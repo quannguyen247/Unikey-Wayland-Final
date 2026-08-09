@@ -1,3 +1,9 @@
+unikey-wayland (2.0.10~ppa1~noble) noble; urgency=medium
+
+  * Windows Edition: Optimize KeyboardHookProc latency and batch SendInput calls to eliminate key stroke lag.
+
+ -- Truong Hieu <11Leak1234@protonmail.com>  Sun, 09 Aug 2026 09:10:00 +0700
+
 unikey-wayland (2.0.9~ppa1~noble) noble; urgency=medium
 
   * Fix missing IBus engine binary and component XML packaging for GNOME support (#5).

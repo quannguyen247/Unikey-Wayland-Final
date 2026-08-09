@@ -66,10 +66,24 @@ std::string _composedWord = "";
 std::unordered_set<DWORD> eaten_keys;
 const ULONG_PTR BAMBOO_MAGIC_INJECT = 0xBAAB00;
 
-void SendInputString(int backspaces, const std::wstring& str) {
-    if (backspaces <= 0 && str.empty()) return;
-    std::vector<INPUT> inputs;
+void SendInputCombined(wchar_t initialChar, int backspaces, const std::wstring& str) {
+    if (initialChar == 0 && backspaces <= 0 && str.empty()) return;
     
+    std::vector<INPUT> inputs;
+    inputs.reserve((initialChar ? 2 : 0) + backspaces * 2 + str.length() * 2);
+
+    // Initial terminating key injection if needed
+    if (initialChar != 0) {
+        INPUT in = {};
+        in.type = INPUT_KEYBOARD;
+        in.ki.wScan = initialChar;
+        in.ki.dwFlags = KEYEVENTF_UNICODE;
+        in.ki.dwExtraInfo = BAMBOO_MAGIC_INJECT;
+        inputs.push_back(in);
+        in.ki.dwFlags = KEYEVENTF_UNICODE | KEYEVENTF_KEYUP;
+        inputs.push_back(in);
+    }
+
     // Add backspaces
     for (int i = 0; i < backspaces; i++) {
         INPUT in = {};
@@ -93,7 +107,13 @@ void SendInputString(int backspaces, const std::wstring& str) {
         inputs.push_back(in);
     }
     
-    SendInput((UINT)inputs.size(), inputs.data(), sizeof(INPUT));
+    if (!inputs.empty()) {
+        SendInput((UINT)inputs.size(), inputs.data(), sizeof(INPUT));
+    }
+}
+
+void SendInputString(int backspaces, const std::wstring& str) {
+    SendInputCombined(0, backspaces, str);
 }
 
 // ---------------------------------------------------------
@@ -112,14 +132,20 @@ LRESULT CALLBACK KeyboardHookProc(int nCode, WPARAM wParam, LPARAM lParam) {
     if (nCode >= 0) {
         KBDLLHOOKSTRUCT* pkb = (KBDLLHOOKSTRUCT*)lParam;
 
-        if (pkb->dwExtraInfo == BAMBOO_MAGIC_INJECT) {
+        // Fast path for injected events or fake packet events
+        if (pkb->dwExtraInfo == BAMBOO_MAGIC_INJECT || pkb->vkCode == VK_PACKET) {
             return CallNextHookEx(NULL, nCode, wParam, lParam);
         }
 
-        if (pkb->vkCode == VK_PACKET) {
-            return CallNextHookEx(NULL, nCode, wParam, lParam);
+        // Fast path for eaten keyup events
+        if (wParam == WM_KEYUP || wParam == WM_SYSKEYUP) {
+            if (!eaten_keys.empty() && eaten_keys.count(pkb->vkCode)) {
+                eaten_keys.erase(pkb->vkCode);
+                return 1;
+            }
         }
 
+        // Check modifiers
         bool isCtrl = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
         bool isAlt = (GetAsyncKeyState(VK_MENU) & 0x8000) != 0;
         bool isShift = (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
@@ -139,19 +165,13 @@ LRESULT CALLBACK KeyboardHookProc(int nCode, WPARAM wParam, LPARAM lParam) {
             if (switchKeyConfig == 1 && isAlt && pkb->vkCode == 'Z') {
                 g_viet_mode = !g_viet_mode;
                 if (g_mainWindow) g_mainWindow->setVietMode(g_viet_mode);
-                // Update icon implicitly via timer or direct call if available
                 return 1; // Eat the Z key
             }
         }
         
         if (wParam == WM_KEYUP || wParam == WM_SYSKEYUP) {
-            if (eaten_keys.count(pkb->vkCode)) {
-                eaten_keys.erase(pkb->vkCode);
-                return 1;
-            }
             if (pkb->vkCode == VK_CONTROL || pkb->vkCode == VK_SHIFT || pkb->vkCode == VK_LCONTROL || pkb->vkCode == VK_RCONTROL || pkb->vkCode == VK_LSHIFT || pkb->vkCode == VK_RSHIFT) {
                 if (switchKeyConfig == 0 && g_ctrl_shift_down && !g_other_key_pressed) {
-                    // Check if both are now released or one is released? Usually toggle on release of either.
                     g_viet_mode = !g_viet_mode;
                     if (g_mainWindow) g_mainWindow->setVietMode(g_viet_mode);
                     g_ctrl_shift_down = false; // reset
@@ -167,9 +187,9 @@ LRESULT CALLBACK KeyboardHookProc(int nCode, WPARAM wParam, LPARAM lParam) {
 
         if (wParam == WM_KEYDOWN || wParam == WM_SYSKEYDOWN) {
             if (isCtrl || isAlt || isWin || !g_viet_mode) {
-                if (_composedWord != "") {
-                    _composedWord = "";
-                    Bamboo_Reset();
+                if (!_composedWord.empty()) {
+                    _composedWord.clear();
+                    if (Bamboo_Reset) Bamboo_Reset();
                 }
                 return CallNextHookEx(NULL, nCode, wParam, lParam);
             }
@@ -183,7 +203,7 @@ LRESULT CALLBACK KeyboardHookProc(int nCode, WPARAM wParam, LPARAM lParam) {
                 c = '\n';
             } else {
                 BYTE ks[256] = {0};
-                ks[VK_SHIFT] = (GetKeyState(VK_SHIFT) & 0x8000) ? 0x80 : 0;
+                ks[VK_SHIFT] = isShift ? 0x80 : 0;
                 ks[VK_CAPITAL] = (GetKeyState(VK_CAPITAL) & 0x0001) ? 0x01 : 0;
                 WCHAR wch[4] = {0};
                 if (ToUnicode(pkb->vkCode, pkb->scanCode, ks, wch, 4, 0) > 0) {
@@ -198,53 +218,54 @@ LRESULT CALLBACK KeyboardHookProc(int nCode, WPARAM wParam, LPARAM lParam) {
                     if (_composedWord.empty()) {
                         return CallNextHookEx(NULL, nCode, wParam, lParam);
                     }
-                    Bamboo_RemoveLastChar();
-                } else if (!Bamboo_CanProcessKey(c)) {
+                    if (Bamboo_RemoveLastChar) Bamboo_RemoveLastChar();
+                } else if (!Bamboo_CanProcessKey || !Bamboo_CanProcessKey(c)) {
                     bool macro_applied = false;
                     if (g_mainWindow && g_mainWindow->isMacroEnabled()) {
-                        auto macros = g_mainWindow->getMacros();
-                        if (macros.find(_composedWord) != macros.end()) {
-                            std::string macro_val = macros[_composedWord];
+                        const auto& macros = g_mainWindow->getMacros();
+                        auto it = macros.find(_composedWord);
+                        if (it != macros.end()) {
+                            const std::string& macro_val = it->second;
                             int char_backs = utf8_strlen(_composedWord);
                             
                             std::wstring macro_wstr = utf8_to_wstring(macro_val);
                             if (c != '\b' && c != 0) {
                                 macro_wstr += (wchar_t)c;
                             }
-                            // CƠ CHẾ LÁCH LỖI CHROME OMNIBOX
                             if (char_backs > 0 && c != '\b' && c != 0) {
-                                SendInputString(0, std::wstring(1, (wchar_t)c));
-                                SendInputString(char_backs + 1, macro_wstr);
+                                SendInputCombined((wchar_t)c, char_backs + 1, macro_wstr);
                             } else {
-                                SendInputString(char_backs, macro_wstr);
+                                SendInputCombined(0, char_backs, macro_wstr);
                             }
                             macro_applied = true;
                         }
                     }
-                    _composedWord = "";
-                    Bamboo_Reset();
+                    _composedWord.clear();
+                    if (Bamboo_Reset) Bamboo_Reset();
                     if (macro_applied) {
                         eaten_keys.insert(pkb->vkCode);
                         return 1; // Eat the terminating key if macro is triggered
                     }
                     return CallNextHookEx(NULL, nCode, wParam, lParam);
                 } else {
-                    Bamboo_ProcessKey(c);
+                    if (Bamboo_ProcessKey) Bamboo_ProcessKey(c);
                 }
 
                 char* preedit_ptr = Bamboo_GetPreeditString ? Bamboo_GetPreeditString() : nullptr;
                 std::string new_composed = preedit_ptr ? preedit_ptr : "";
-                // Do not free(preedit_ptr) on Windows due to cross-DLL heap corruption.
 
-                // Native Wayland Surrounding Diff Logic
+                // Optimized Surrounding Diff Logic
                 int common_bytes = 0;
                 size_t i = 0, j = 0;
-                while (i < old_composed.length() && j < new_composed.length()) {
+                const size_t len_old = old_composed.length();
+                const size_t len_new = new_composed.length();
+
+                while (i < len_old && j < len_new) {
                     int len1 = 1, len2 = 1;
-                    while (i + len1 < old_composed.length() && (old_composed[i + len1] & 0xC0) == 0x80) len1++;
-                    while (j + len2 < new_composed.length() && (new_composed[j + len2] & 0xC0) == 0x80) len2++;
+                    while (i + len1 < len_old && (old_composed[i + len1] & 0xC0) == 0x80) len1++;
+                    while (j + len2 < len_new && (new_composed[j + len2] & 0xC0) == 0x80) len2++;
                     
-                    if (len1 == len2 && old_composed.substr(i, len1) == new_composed.substr(j, len2)) {
+                    if (len1 == len2 && memcmp(old_composed.data() + i, new_composed.data() + j, len1) == 0) {
                         common_bytes += len1;
                         i += len1;
                         j += len2;
@@ -253,9 +274,9 @@ LRESULT CALLBACK KeyboardHookProc(int nCode, WPARAM wParam, LPARAM lParam) {
 
                 int char_backs = 0;
                 size_t p = common_bytes;
-                while (p < old_composed.length()) {
+                while (p < len_old) {
                     int len = 1;
-                    while (p + len < old_composed.length() && (old_composed[p + len] & 0xC0) == 0x80) len++;
+                    while (p + len < len_old && (old_composed[p + len] & 0xC0) == 0x80) len++;
                     char_backs++;
                     p += len;
                 }
@@ -263,12 +284,10 @@ LRESULT CALLBACK KeyboardHookProc(int nCode, WPARAM wParam, LPARAM lParam) {
                 std::wstring to_insert = utf8_to_wstring(new_composed.substr(common_bytes));
 
                 if (char_backs > 0 || !to_insert.empty()) {
-                    // CƠ CHẾ LÁCH LỖI CHROME OMNIBOX
                     if (char_backs > 0 && c != '\b' && c != 0) {
-                        SendInputString(0, std::wstring(1, (wchar_t)c));
-                        SendInputString(char_backs + 1, to_insert);
+                        SendInputCombined((wchar_t)c, char_backs + 1, to_insert);
                     } else {
-                        SendInputString(char_backs, to_insert);
+                        SendInputCombined(0, char_backs, to_insert);
                     }
                 }
 

@@ -4,6 +4,11 @@ Tất cả các thay đổi đáng chú ý của dự án bộ gõ Unikey Waylan
 
 Định dạng dựa trên [Keep a Changelog](https://keepachangelog.com/vi/1.0.0/).
 
+## [2.0.10] - 2026-08-09
+
+### Đã cải thiện (Improved)
+- **Windows Edition**: Tối ưu hóa hiệu năng gõ và giảm độ trễ phím (latency) cho Keyboard Hook bằng cách gộp chuỗi gửi phím `SendInputCombined` (giảm 50% số lần gọi API kernel), tối ưu hóa tra cứu bảng gõ tắt (0-copy Macro lookup) và thuật toán so sánh chuỗi biến đổi.
+
 ## [2.0.9] - 2026-08-09
 
 ### Đã sửa (Fixed)

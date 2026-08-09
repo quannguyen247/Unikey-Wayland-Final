@@ -1,5 +1,5 @@
 Name:           unikey-wayland
-Version:        2.0.9
+Version:        2.0.10
 Release:        1%{?dist}
 Summary:        Unikey Wayland Input Method for Vietnamese
 Packager:       Trương Hiếu
@@ -85,6 +85,8 @@ chmod 644 %{buildroot}/usr/share/applications/ibus-setup-unikey-wayland.desktop
 %{_datadir}/applications/ibus-setup-unikey-wayland.desktop
 
 %changelog
+* Sun Aug 09 2026 Trương Hiếu - 2.0.10-1
+- Windows Edition: Optimize KeyboardHookProc latency and batch SendInput calls to eliminate key stroke lag
 * Sun Aug 09 2026 Trương Hiếu - 2.0.9-1
 - Fix missing IBus engine binary and component XML in RPM package for GNOME support (#5)
 - Auto-detect Google Workspace (Docs, Sheets, Slides, Forms) and Discord for Preedit mode
