@@ -1,3 +1,10 @@
+unikey-wayland (2.0.9~ppa1~noble) noble; urgency=medium
+
+  * Fix missing IBus engine binary and component XML packaging for GNOME support (#5).
+  * Auto-detect Google Workspace (Docs, Sheets, Slides, Forms) and Discord for Preedit mode.
+
+ -- Truong Hieu <11Leak1234@protonmail.com>  Sun, 09 Aug 2026 09:04:00 +0700
+
 unikey-wayland (2.0.8~ppa1~noble) noble; urgency=medium
 
   * Fix missing KDE Wayland Virtual Keyboard metadata in desktop file

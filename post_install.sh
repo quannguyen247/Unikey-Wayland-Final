@@ -14,8 +14,19 @@ post_install() {
             chown "$user" "$d/.config/autostart/org.fcitx.Fcitx5.desktop" 2>/dev/null || true
 
             if [ "$HAS_KDE" -eq 1 ]; then
-                sed -i 's/^export.*fcitx/#&/g' "$d/.bashrc" "$d/.profile" "$d/.xprofile" 2>/dev/null || true
-                sed -i 's/^export.*ibus/#&/g' "$d/.bashrc" "$d/.profile" "$d/.xprofile" 2>/dev/null || true
+                sed -i 's/^export.*fcitx/#&/g' "$d/.bashrc" "$d/.profile" "$d/.xprofile" "$d/.bash_profile" 2>/dev/null || true
+                sed -i 's/^export.*ibus/#&/g' "$d/.bashrc" "$d/.profile" "$d/.xprofile" "$d/.bash_profile" 2>/dev/null || true
+
+                mkdir -p "$d/.config/environment.d"
+                cat << 'ENVEOF' > "$d/.config/environment.d/99-unikey-wayland.conf"
+GTK_IM_MODULE=wayland
+QT_IM_MODULE=wayland
+XMODIFIERS=@im=wayland
+ENVEOF
+                chown -R "$user" "$d/.config/environment.d" 2>/dev/null || true
+                if command -v flatpak >/dev/null 2>&1; then
+                    su - "$user" -c 'flatpak override --user --env=GTK_IM_MODULE=wayland --env=QT_IM_MODULE=wayland --env=XMODIFIERS=@im=wayland' 2>/dev/null || true
+                fi
             fi
             
             if [ "$HAS_GNOME_OR_OTHER" -eq 1 ] || [ "$HAS_KDE" -eq 0 ]; then

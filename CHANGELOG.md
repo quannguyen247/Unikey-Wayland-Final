@@ -4,6 +4,12 @@ Tất cả các thay đổi đáng chú ý của dự án bộ gõ Unikey Waylan
 
 Định dạng dựa trên [Keep a Changelog](https://keepachangelog.com/vi/1.0.0/).
 
+## [2.0.9] - 2026-08-09
+
+### Đã sửa (Fixed)
+- Sửa lỗi thiếu binary `ibus-engine-unikey-wayland` và tệp XML cấu hình IBus Component trong gói RPM (`.rpm`) và Arch (`.pkg.tar.zst`), giúp GNOME hiển thị bộ gõ trong mục "Add Input Source" (#5).
+- Tự động nhận diện bộ ứng dụng Google Workspace (Google Docs, Sheets, Slides, Forms cả tiếng Anh và tiếng Việt) và Discord qua KWin D-Bus để bật Preedit mode, tránh lặp chữ trên các canvas engine.
+
 ## [2.0.8] - 2026-07-17
 
 ### Đã sửa (Fixed)

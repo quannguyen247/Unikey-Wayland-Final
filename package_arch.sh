@@ -3,7 +3,7 @@
 # Chạy script này từ thư mục gốc của dự án: ./package_arch.sh
 set -e
 
-PKGVER="2.0.8"
+PKGVER="2.0.9"
 PKGREL="1"
 # Tự động phát hiện kiến trúc hệ thống
 DETECTED_ARCH=$(uname -m)
@@ -47,6 +47,8 @@ echo ">>> Tạo cấu trúc thư mục..."
 rm -rf arch_pkg
 mkdir -p releases
 mkdir -p arch_pkg/usr/bin
+mkdir -p arch_pkg/usr/libexec
+mkdir -p arch_pkg/usr/share/ibus/component
 mkdir -p arch_pkg/usr/share/applications
 mkdir -p arch_pkg/usr/share/metainfo
 mkdir -p arch_pkg/usr/share/icons/hicolor/scalable/apps
@@ -54,12 +56,30 @@ mkdir -p arch_pkg/usr/share/icons/hicolor/scalable/apps
 # 3. Sao chép các tệp tin cấu hình và binary
 echo ">>> Đang sao chép các tệp tin hệ thống..."
 cp wayland-client/build/unikey-wayland arch_pkg/usr/bin/
+if [ -f wayland-client/build/ibus-engine-unikey-wayland ]; then
+    cp wayland-client/build/ibus-engine-unikey-wayland arch_pkg/usr/libexec/
+fi
+if [ -f ibus-engine/unikey-wayland.xml ]; then
+    cp ibus-engine/unikey-wayland.xml arch_pkg/usr/share/ibus/component/
+fi
+if [ -f ibus-engine/ibus-setup-unikey-wayland.desktop ]; then
+    cp ibus-engine/ibus-setup-unikey-wayland.desktop arch_pkg/usr/share/applications/
+fi
 cp io.github.ubuntu2310fake.UnikeyWayland.desktop arch_pkg/usr/share/applications/
 cp io.github.ubuntu2310fake.UnikeyWayland.metainfo.xml arch_pkg/usr/share/metainfo/
 cp io.github.ubuntu2310fake.UnikeyWayland.svg arch_pkg/usr/share/icons/hicolor/scalable/apps/
 
 # 4. Thay đổi quyền truy cập tiêu chuẩn
 chmod 755 arch_pkg/usr/bin/unikey-wayland
+if [ -f arch_pkg/usr/libexec/ibus-engine-unikey-wayland ]; then
+    chmod 755 arch_pkg/usr/libexec/ibus-engine-unikey-wayland
+fi
+if [ -f arch_pkg/usr/share/ibus/component/unikey-wayland.xml ]; then
+    chmod 644 arch_pkg/usr/share/ibus/component/unikey-wayland.xml
+fi
+if [ -f arch_pkg/usr/share/applications/ibus-setup-unikey-wayland.desktop ]; then
+    chmod 644 arch_pkg/usr/share/applications/ibus-setup-unikey-wayland.desktop
+fi
 chmod 644 arch_pkg/usr/share/applications/io.github.ubuntu2310fake.UnikeyWayland.desktop
 chmod 644 arch_pkg/usr/share/metainfo/io.github.ubuntu2310fake.UnikeyWayland.metainfo.xml
 chmod 644 arch_pkg/usr/share/icons/hicolor/scalable/apps/io.github.ubuntu2310fake.UnikeyWayland.svg

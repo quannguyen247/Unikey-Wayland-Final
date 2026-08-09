@@ -1,5 +1,5 @@
 Name:           unikey-wayland
-Version:        2.0.8
+Version:        2.0.9
 Release:        1%{?dist}
 Summary:        Unikey Wayland Input Method for Vietnamese
 Packager:       Trương Hiếu
@@ -9,6 +9,9 @@ Source0:        unikey-wayland
 Source1:        io.github.ubuntu2310fake.UnikeyWayland.desktop
 Source2:        io.github.ubuntu2310fake.UnikeyWayland.metainfo.xml
 Source3:        io.github.ubuntu2310fake.UnikeyWayland.svg
+Source4:        ibus-engine-unikey-wayland
+Source5:        unikey-wayland.xml
+Source6:        ibus-setup-unikey-wayland.desktop
 
 License:        GPL-2.0-or-later
 URL:            https://github.com/ubuntu2310fake/Unikey-Wayland
@@ -48,6 +51,8 @@ done
 %install
 rm -rf %{buildroot}
 mkdir -p %{buildroot}/usr/bin
+mkdir -p %{buildroot}/usr/libexec
+mkdir -p %{buildroot}/usr/share/ibus/component
 mkdir -p %{buildroot}/usr/share/applications
 mkdir -p %{buildroot}/usr/share/metainfo
 mkdir -p %{buildroot}/usr/share/icons/hicolor/scalable/apps
@@ -57,6 +62,18 @@ cp %{SOURCE0} %{buildroot}/usr/bin/unikey-wayland
 cp %{SOURCE1} %{buildroot}/usr/share/applications/io.github.ubuntu2310fake.UnikeyWayland.desktop
 cp %{SOURCE2} %{buildroot}/usr/share/metainfo/io.github.ubuntu2310fake.UnikeyWayland.metainfo.xml
 cp %{SOURCE3} %{buildroot}/usr/share/icons/hicolor/scalable/apps/io.github.ubuntu2310fake.UnikeyWayland.svg
+if [ -f %{SOURCE4} ]; then
+    cp %{SOURCE4} %{buildroot}/usr/libexec/ibus-engine-unikey-wayland
+    chmod 755 %{buildroot}/usr/libexec/ibus-engine-unikey-wayland
+fi
+if [ -f %{SOURCE5} ]; then
+    cp %{SOURCE5} %{buildroot}/usr/share/ibus/component/unikey-wayland.xml
+    chmod 644 %{buildroot}/usr/share/ibus/component/unikey-wayland.xml
+fi
+if [ -f %{SOURCE6} ]; then
+    cp %{SOURCE6} %{buildroot}/usr/share/applications/ibus-setup-unikey-wayland.desktop
+    chmod 644 %{buildroot}/usr/share/applications/ibus-setup-unikey-wayland.desktop
+fi
 
 # Ensure correct permissions
 chmod 755 %{buildroot}/usr/bin/unikey-wayland
@@ -69,8 +86,14 @@ chmod 644 %{buildroot}/usr/share/icons/hicolor/scalable/apps/io.github.ubuntu231
 /usr/share/applications/io.github.ubuntu2310fake.UnikeyWayland.desktop
 /usr/share/metainfo/io.github.ubuntu2310fake.UnikeyWayland.metainfo.xml
 /usr/share/icons/hicolor/scalable/apps/io.github.ubuntu2310fake.UnikeyWayland.svg
+%{_libexecdir}/ibus-engine-unikey-wayland
+%{_datadir}/ibus/component/unikey-wayland.xml
+%{_datadir}/applications/ibus-setup-unikey-wayland.desktop
 
 %changelog
+* Sun Aug 09 2026 Trương Hiếu - 2.0.9-1
+- Fix missing IBus engine binary and component XML in RPM package for GNOME support (#5)
+- Auto-detect Google Workspace (Docs, Sheets, Slides, Forms) and Discord for Preedit mode
 * Fri Jul 17 2026 Trương Hiếu - 2.0.8-1
 - Fix missing KDE Wayland Virtual Keyboard metadata in desktop file
 * Fri Jul 17 2026 Trương Hiếu - 2.0.6-1

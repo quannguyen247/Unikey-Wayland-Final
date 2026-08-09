@@ -32,6 +32,20 @@ void WindowTracker::loadExcludedApps() {
         QDir().mkpath(QFileInfo(configPath).absolutePath());
         if (file.open(QIODevice::WriteOnly | QIODevice::Text)) {
             QTextStream out(&file);
+            out << "google docs\n";
+            out << "google tài liệu\n";
+            out << "docs.google.com\n";
+            out << "google sheets\n";
+            out << "google trang tính\n";
+            out << "sheets.google.com\n";
+            out << "google slides\n";
+            out << "google trình bày\n";
+            out << "google trang trình bày\n";
+            out << "slides.google.com\n";
+            out << "google forms\n";
+            out << "google biểu mẫu\n";
+            out << "forms.google.com\n";
+            out << "discord\n";
             out << "kitty\n";
             out << "alacritty\n";
             out << "konsole\n";
@@ -103,15 +117,28 @@ void WindowTracker::injectKWinScript() {
     }
 
     QString scriptCode = 
-        "workspace.windowActivated.connect(function(client) {\n"
+        "function notifyActiveWindow(client) {\n"
         "    if (client) {\n"
-        "        callDBus('io.github.ubuntu2310fake.UnikeyWayland', '/WindowTracker', 'io.github.ubuntu2310fake.UnikeyWayland.WindowTracker', 'activeWindowChanged', client.resourceClass.toString());\n"
+        "        var resClass = (client.resourceClass ? client.resourceClass : (client.desktopFileName ? client.desktopFileName : '')).toString();\n"
+        "        var title = (client.caption ? client.caption : (client.title ? client.title : '')).toString();\n"
+        "        callDBus('io.github.ubuntu2310fake.UnikeyWayland', '/WindowTracker', 'io.github.ubuntu2310fake.UnikeyWayland.WindowTracker', 'activeWindowChanged', resClass + '|||' + title);\n"
         "    } else {\n"
         "        callDBus('io.github.ubuntu2310fake.UnikeyWayland', '/WindowTracker', 'io.github.ubuntu2310fake.UnikeyWayland.WindowTracker', 'activeWindowChanged', '');\n"
         "    }\n"
+        "}\n"
+        "workspace.windowActivated.connect(function(client) {\n"
+        "    notifyActiveWindow(client);\n"
+        "    if (client) {\n"
+        "        try {\n"
+        "            client.captionChanged.connect(function() {\n"
+        "                notifyActiveWindow(client);\n"
+        "            });\n"
+        "        } catch (e) {}\n"
+        "    }\n"
         "});\n"
-        "if (workspace.activeWindow) {\n"
-        "    callDBus('io.github.ubuntu2310fake.UnikeyWayland', '/WindowTracker', 'io.github.ubuntu2310fake.UnikeyWayland.WindowTracker', 'activeWindowChanged', workspace.activeWindow.resourceClass.toString());\n"
+        "var active = workspace.activeWindow ? workspace.activeWindow : workspace.activeClient;\n"
+        "if (active) {\n"
+        "    notifyActiveWindow(active);\n"
         "}\n";
 
     // Write to a temporary file
