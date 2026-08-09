@@ -62,24 +62,18 @@ cp %{SOURCE0} %{buildroot}/usr/bin/unikey-wayland
 cp %{SOURCE1} %{buildroot}/usr/share/applications/io.github.ubuntu2310fake.UnikeyWayland.desktop
 cp %{SOURCE2} %{buildroot}/usr/share/metainfo/io.github.ubuntu2310fake.UnikeyWayland.metainfo.xml
 cp %{SOURCE3} %{buildroot}/usr/share/icons/hicolor/scalable/apps/io.github.ubuntu2310fake.UnikeyWayland.svg
-if [ -f %{SOURCE4} ]; then
-    cp %{SOURCE4} %{buildroot}/usr/libexec/ibus-engine-unikey-wayland
-    chmod 755 %{buildroot}/usr/libexec/ibus-engine-unikey-wayland
-fi
-if [ -f %{SOURCE5} ]; then
-    cp %{SOURCE5} %{buildroot}/usr/share/ibus/component/unikey-wayland.xml
-    chmod 644 %{buildroot}/usr/share/ibus/component/unikey-wayland.xml
-fi
-if [ -f %{SOURCE6} ]; then
-    cp %{SOURCE6} %{buildroot}/usr/share/applications/ibus-setup-unikey-wayland.desktop
-    chmod 644 %{buildroot}/usr/share/applications/ibus-setup-unikey-wayland.desktop
-fi
+cp %{SOURCE4} %{buildroot}/usr/libexec/ibus-engine-unikey-wayland
+cp %{SOURCE5} %{buildroot}/usr/share/ibus/component/unikey-wayland.xml
+cp %{SOURCE6} %{buildroot}/usr/share/applications/ibus-setup-unikey-wayland.desktop
 
 # Ensure correct permissions
 chmod 755 %{buildroot}/usr/bin/unikey-wayland
+chmod 755 %{buildroot}/usr/libexec/ibus-engine-unikey-wayland
 chmod 644 %{buildroot}/usr/share/applications/io.github.ubuntu2310fake.UnikeyWayland.desktop
 chmod 644 %{buildroot}/usr/share/metainfo/io.github.ubuntu2310fake.UnikeyWayland.metainfo.xml
 chmod 644 %{buildroot}/usr/share/icons/hicolor/scalable/apps/io.github.ubuntu2310fake.UnikeyWayland.svg
+chmod 644 %{buildroot}/usr/share/ibus/component/unikey-wayland.xml
+chmod 644 %{buildroot}/usr/share/applications/ibus-setup-unikey-wayland.desktop
 
 %files
 /usr/bin/unikey-wayland

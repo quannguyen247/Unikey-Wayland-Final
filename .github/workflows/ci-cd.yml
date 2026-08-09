@@ -51,6 +51,9 @@ jobs:
           mkdir -p ~/rpmbuild/SOURCES
           mkdir -p ~/rpmbuild/SPECS
           cp wayland-client/build/unikey-wayland ~/rpmbuild/SOURCES/
+          cp wayland-client/build/ibus-engine-unikey-wayland ~/rpmbuild/SOURCES/
+          cp ibus-engine/unikey-wayland.xml ~/rpmbuild/SOURCES/
+          cp ibus-engine/ibus-setup-unikey-wayland.desktop ~/rpmbuild/SOURCES/
           cp io.github.ubuntu2310fake.UnikeyWayland.desktop ~/rpmbuild/SOURCES/
           cp io.github.ubuntu2310fake.UnikeyWayland.metainfo.xml ~/rpmbuild/SOURCES/
           cp io.github.ubuntu2310fake.UnikeyWayland.svg ~/rpmbuild/SOURCES/
@@ -105,7 +108,7 @@ jobs:
 
       - name: Install Fedora Dependencies
         run: |
-          dnf install -y cmake gcc-c++ qt6-qtbase-devel wayland-devel wayland-protocols-devel pkgconfig golang rpm-build copr-cli git
+          dnf install -y cmake gcc-c++ qt6-qtbase-devel wayland-devel wayland-protocols-devel pkgconfig golang rpm-build copr-cli git ibus-devel
 
       - name: Build Source
         run: |
@@ -120,6 +123,9 @@ jobs:
           mkdir -p ~/rpmbuild/SPECS
           mkdir -p releases
           cp wayland-client/build/unikey-wayland ~/rpmbuild/SOURCES/
+          cp wayland-client/build/ibus-engine-unikey-wayland ~/rpmbuild/SOURCES/
+          cp ibus-engine/unikey-wayland.xml ~/rpmbuild/SOURCES/
+          cp ibus-engine/ibus-setup-unikey-wayland.desktop ~/rpmbuild/SOURCES/
           cp io.github.ubuntu2310fake.UnikeyWayland.desktop ~/rpmbuild/SOURCES/
           cp io.github.ubuntu2310fake.UnikeyWayland.metainfo.xml ~/rpmbuild/SOURCES/
           cp io.github.ubuntu2310fake.UnikeyWayland.svg ~/rpmbuild/SOURCES/
@@ -184,7 +190,6 @@ jobs:
       - name: Install Qt
         uses: jurplel/install-qt-action@v3
         with:
-          aqtversion: '==3.3.0'
           version: '6.8.0'
           host: 'windows'
           target: 'desktop'
@@ -255,7 +260,6 @@ jobs:
       - name: Install Host Qt (x64)
         uses: jurplel/install-qt-action@v3
         with:
-          aqtversion: '==3.3.0'
           version: '6.8.0'
           host: 'windows'
           target: 'desktop'
@@ -265,7 +269,6 @@ jobs:
       - name: Install Target Qt (ARM64)
         uses: jurplel/install-qt-action@v3
         with:
-          aqtversion: '==3.3.0'
           version: '6.8.0'
           host: 'windows'
           target: 'desktop'
