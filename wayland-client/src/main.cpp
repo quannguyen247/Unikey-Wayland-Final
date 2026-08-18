@@ -18,6 +18,7 @@ static void log_to_file(const std::string& msg) {
 
 #include <QApplication>
 #include <QSocketNotifier>
+#include <thread>
 #include "mainwindow.h"
 #include "trayicon.h"
 
@@ -508,6 +509,7 @@ static const struct zwp_input_method_context_v1_listener input_method_context_li
 
 
 static void input_method_activate(void* data, struct zwp_input_method_v1* input_method, struct zwp_input_method_context_v1* context) {
+    log_to_file("DEBUG: input_method_activate triggered by KWin!");
     WaylandState* state = static_cast<WaylandState*>(data);
     state->active = true;
 
@@ -525,7 +527,10 @@ static void input_method_activate(void* data, struct zwp_input_method_v1* input_
     
     state->keyboard = zwp_input_method_context_v1_grab_keyboard(state->context);
     if (state->keyboard) {
+        log_to_file("DEBUG: grab_keyboard succeeded! Adding keyboard listener.");
         wl_keyboard_add_listener(state->keyboard, &keyboard_listener, state);
+    } else {
+        log_to_file("ERROR: grab_keyboard returned NULL!");
     }
 }
 
@@ -569,15 +574,27 @@ static const struct wl_registry_listener registry_listener = {
 };
 
 int main(int argc, char **argv) {
-    Bamboo_Init(); // KÍCH HOẠT NÃO CGO BAMBOO
-    
-    setenv("QT_QPA_PLATFORM", "wayland;xcb", 0); // Prefer Wayland, fallback to xcb. 0 means don't overwrite if user explicitly set it.
+    Bamboo_Init();
+    int im_socket_fd = -1;
+    char* wayland_socket_env = getenv("WAYLAND_SOCKET");
+    if (wayland_socket_env) {
+        int orig_fd = atoi(wayland_socket_env);
+        im_socket_fd = dup(orig_fd);
+        unsetenv("WAYLAND_SOCKET");
+    }
+
+    setenv("QT_QPA_PLATFORM", "wayland;xcb", 0); // Prefer Wayland, fallback to xcb.
     QApplication app(argc, argv);
     app.setQuitOnLastWindowClosed(false);
 
     WaylandState state = {};
 
-    state.display = wl_display_connect(NULL);
+    if (im_socket_fd >= 0) {
+        state.display = wl_display_connect_to_fd(im_socket_fd);
+    } else {
+        state.display = wl_display_connect(NULL);
+    }
+
     if (!state.display) {
         std::cerr << "Failed to connect to Wayland display. Running in GUI-only mode." << std::endl;
     } else {
@@ -593,8 +610,7 @@ int main(int argc, char **argv) {
         zwp_input_method_v1_add_listener(state.input_method, &input_method_listener, &state);
     }
 
-    bool is_gnome_edition = !has_wayland_im;
-    app.setQuitOnLastWindowClosed(is_gnome_edition);
+    bool is_gnome_edition = false;
 
     MainWindow mainWindow(&state.viet_mode, is_gnome_edition);
     g_mainWindow = &mainWindow;
@@ -614,10 +630,7 @@ int main(int argc, char **argv) {
 
     windowTracker.injectKWinScript();
 
-    TrayIcon* trayIcon = nullptr;
-    if (!is_gnome_edition) {
-        trayIcon = new TrayIcon(&state.viet_mode, &mainWindow, is_gnome_edition);
-    }
+    TrayIcon* trayIcon = new TrayIcon(&state.viet_mode, &mainWindow, false);
 
     bool showExclude = false;
     if (argc > 1) {
@@ -634,25 +647,15 @@ int main(int argc, char **argv) {
 
     log_to_file("Wayland IM v1 Client started with Qt GUI. Waiting for events...");
 
-    QSocketNotifier* notifier = nullptr;
     if (state.display) {
-        int fd = wl_display_get_fd(state.display);
-        notifier = new QSocketNotifier(fd, QSocketNotifier::Read, &app);
-        QObject::connect(notifier, &QSocketNotifier::activated, [&state, &app]() {
-            if (wl_display_dispatch(state.display) == -1) {
-                std::cerr << "Wayland display disconnected or error." << std::endl;
-                app.quit();
-                return;
+        std::thread wayland_thread([&state]() {
+            while (state.display) {
+                if (wl_display_dispatch(state.display) == -1) {
+                    break;
+                }
             }
-            while (wl_display_dispatch_pending(state.display) > 0) {
-                // Keep dispatching pending events
-            }
-            wl_display_flush(state.display);
         });
-
-        // We must dispatch any pending events before entering the event loop
-        while (wl_display_dispatch_pending(state.display) > 0) {}
-        wl_display_flush(state.display);
+        wayland_thread.detach();
     }
 
     int ret = app.exec();

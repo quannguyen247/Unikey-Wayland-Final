@@ -11,15 +11,38 @@ import (
 )
 
 var preeditor bamboo.IEngine
-
+var currentMethod string = "Telex"
 var rawKeys []rune
+
+func initEngine(methodName string) {
+	currentMethod = methodName
+	defs := bamboo.GetInputMethodDefinitions()
+	im := bamboo.ParseInputMethod(defs, currentMethod)
+	preeditor = bamboo.NewEngine(im, uint(bamboo.VietnameseMode))
+	rawKeys = make([]rune, 0)
+}
 
 //export Bamboo_Init
 func Bamboo_Init() {
-    defs := bamboo.GetInputMethodDefinitions()
-	im := bamboo.ParseInputMethod(defs, "Telex")
-	preeditor = bamboo.NewEngine(im, uint(bamboo.VietnameseMode))
-    rawKeys = make([]rune, 0)
+	initEngine("Telex")
+}
+
+//export Bamboo_SetInputMethod
+func Bamboo_SetInputMethod(method C.int) {
+	methodName := "Telex"
+	switch int(method) {
+	case 1:
+		methodName = "Telex"
+	case 2:
+		methodName = "VNI"
+	case 3:
+		methodName = "VIQR"
+	case 4:
+		methodName = "Telex 2"
+	default:
+		methodName = "Telex"
+	}
+	initEngine(methodName)
 }
 
 //export Bamboo_CanProcessKey

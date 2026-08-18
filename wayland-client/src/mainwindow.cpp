@@ -17,6 +17,7 @@
 #include <QFileInfo>
 #include <QPlainTextEdit>
 #include "windowtracker.h"
+#include "libbamboo.h"
 
 MainWindow::MainWindow(bool* p_viet_mode, bool is_gnome, QWidget *parent)
     : QWidget(parent), p_viet_mode(p_viet_mode) {
@@ -184,8 +185,7 @@ void MainWindow::applySettings() {
     int method = m_methodCombo->currentData().toInt();
     int charset = m_charsetCombo->currentData().toInt();
     
-    // Toàn bộ logic tùy chọn phức tạp đã được thay bằng Bamboo CGO hiện đại.
-    // Các UI này giữ lại để không phá vỡ layout, nhưng không cần làm gì ở đây.
+    Bamboo_SetInputMethod(method);
 
     saveConfig();
 }
