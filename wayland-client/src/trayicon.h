@@ -46,6 +46,8 @@ signals:
     void NewStatus(const QString& status);
 };
 
+class QDBusServiceWatcher;
+
 class TrayIcon : public QObject {
     Q_OBJECT
 public:
@@ -57,6 +59,7 @@ public:
     void toggleMode();
 
 public slots:
+    void registerWithWatcher();
     void onShowControlPanel();
     void onQuit();
 
@@ -69,6 +72,7 @@ private:
     QAction* m_actionQuit;
 
     StatusNotifierItemAdaptor* m_dbusAdaptor = nullptr;
+    QDBusServiceWatcher* m_serviceWatcher = nullptr;
 };
 
 #endif // TRAYICON_H

@@ -39,8 +39,10 @@ void StatusNotifierItemAdaptor::ContextMenu(int x, int y) {
     tray->onShowControlPanel();
 }
 
+#include <QDBusServiceWatcher>
+
 TrayIcon::TrayIcon(bool* p_viet_mode, MainWindow* mainWindow, bool is_gnome, QObject* parent)
-    : QObject(parent), p_viet_mode(p_viet_mode), m_mainWindow(mainWindow), m_isGnome(is_gnome), m_dbusAdaptor(nullptr) {
+    : QObject(parent), p_viet_mode(p_viet_mode), m_mainWindow(mainWindow), m_isGnome(is_gnome), m_dbusAdaptor(nullptr), m_serviceWatcher(nullptr) {
 
     m_trayMenu = new QMenu();
     m_actionControlPanel = m_trayMenu->addAction("Bảng điều khiển... [CS+F5]");
@@ -55,18 +57,38 @@ TrayIcon::TrayIcon(bool* p_viet_mode, MainWindow* mainWindow, bool is_gnome, QOb
     if (bus.isConnected()) {
         m_dbusAdaptor = new StatusNotifierItemAdaptor(this);
         bus.registerObject("/StatusNotifierItem", this, QDBusConnection::ExportAdaptors);
-        
-        QDBusMessage msg = QDBusMessage::createMethodCall(
+
+        // Watch for StatusNotifierWatcher (in case Plasma/Watcher starts after Unikey or restarts)
+        m_serviceWatcher = new QDBusServiceWatcher(
+            "org.kde.StatusNotifierWatcher",
+            bus,
+            QDBusServiceWatcher::WatchForOwnerChange | QDBusServiceWatcher::WatchForRegistration,
+            this
+        );
+        connect(m_serviceWatcher, &QDBusServiceWatcher::serviceRegistered, this, &TrayIcon::registerWithWatcher);
+        connect(m_serviceWatcher, &QDBusServiceWatcher::serviceOwnerChanged, this, [this](const QString&, const QString&, const QString& newOwner) {
+            if (!newOwner.isEmpty()) {
+                registerWithWatcher();
+            }
+        });
+
+        // Listen for new tray hosts registering (e.g. system tray reloaded/restarted)
+        bus.connect(
             "org.kde.StatusNotifierWatcher",
             "/StatusNotifierWatcher",
             "org.kde.StatusNotifierWatcher",
-            "RegisterStatusNotifierItem"
+            "StatusNotifierHostRegistered",
+            this,
+            SLOT(registerWithWatcher())
         );
-        msg << "/StatusNotifierItem";
-        bus.call(msg);
-    }
 
-    updateIcon();
+        // Register immediately
+        registerWithWatcher();
+
+        // Extra retry shots for slow startup race conditions
+        QTimer::singleShot(500, this, &TrayIcon::registerWithWatcher);
+        QTimer::singleShot(1500, this, &TrayIcon::registerWithWatcher);
+    }
 
     QTimer* timer = new QTimer(this);
     connect(timer, &QTimer::timeout, this, &TrayIcon::updateIcon);
@@ -75,6 +97,26 @@ TrayIcon::TrayIcon(bool* p_viet_mode, MainWindow* mainWindow, bool is_gnome, QOb
 
 TrayIcon::~TrayIcon() {
     delete m_trayMenu;
+}
+
+void TrayIcon::registerWithWatcher() {
+    QDBusConnection bus = QDBusConnection::sessionBus();
+    if (!bus.isConnected()) return;
+
+    QDBusMessage msg = QDBusMessage::createMethodCall(
+        "org.kde.StatusNotifierWatcher",
+        "/StatusNotifierWatcher",
+        "org.kde.StatusNotifierWatcher",
+        "RegisterStatusNotifierItem"
+    );
+    msg << "/StatusNotifierItem";
+    bus.call(msg);
+
+    if (m_dbusAdaptor) {
+        emit m_dbusAdaptor->NewIcon();
+        emit m_dbusAdaptor->NewTitle();
+        emit m_dbusAdaptor->NewStatus(QString("Active"));
+    }
 }
 
 void TrayIcon::toggleMode() {

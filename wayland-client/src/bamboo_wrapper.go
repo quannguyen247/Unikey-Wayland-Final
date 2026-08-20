@@ -12,13 +12,14 @@ import (
 
 var preeditor bamboo.IEngine
 var currentMethod string = "Telex"
+var currentFlags uint = bamboo.EfreeToneMarking
 var rawKeys []rune
 
 func initEngine(methodName string) {
 	currentMethod = methodName
 	defs := bamboo.GetInputMethodDefinitions()
 	im := bamboo.ParseInputMethod(defs, currentMethod)
-	preeditor = bamboo.NewEngine(im, uint(bamboo.VietnameseMode))
+	preeditor = bamboo.NewEngine(im, currentFlags)
 	rawKeys = make([]rune, 0)
 }
 
@@ -43,6 +44,30 @@ func Bamboo_SetInputMethod(method C.int) {
 		methodName = "Telex"
 	}
 	initEngine(methodName)
+}
+
+//export Bamboo_SetOptions
+func Bamboo_SetOptions(freeMarking C.bool, modernStyle C.bool, spellCheck C.bool, autoRestore C.bool) {
+	var flags uint = 0
+	if bool(freeMarking) {
+		flags |= bamboo.EfreeToneMarking
+	}
+	// Bamboo Core semantics:
+	// EstdToneStyle (true) puts tone on first vowel -> òa, úy (truyền thống)
+	// EstdToneStyle (false) puts tone on second vowel -> oà, uý (kiểu mới)
+	// Checkbox "Đặt dấu oà, uý (thay vì òa, úy)":
+	// Unticked (false) -> user wants òa, úy -> set EstdToneStyle
+	// Ticked (true) -> user wants oà, uý -> clear EstdToneStyle
+	if !bool(modernStyle) {
+		flags |= bamboo.EstdToneStyle
+	}
+	if bool(spellCheck) {
+		flags |= bamboo.EautoCorrectEnabled
+	}
+	currentFlags = flags
+	if preeditor != nil {
+		preeditor.SetFlag(currentFlags)
+	}
 }
 
 //export Bamboo_CanProcessKey

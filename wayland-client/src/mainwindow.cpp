@@ -187,7 +187,13 @@ void MainWindow::applySettings() {
     int method = m_methodCombo->currentData().toInt();
     int charset = m_charsetCombo->currentData().toInt();
     
+    bool freeMarking = m_freeMarkingCheck->isChecked();
+    bool modernStyle = m_modernStyleCheck->isChecked();
+    bool autoRestore = m_autoRestoreCheck->isChecked();
+    bool spellCheck = m_spellCheckCheck->isChecked();
+
     Bamboo_SetInputMethod(method);
+    Bamboo_SetOptions(freeMarking, modernStyle, spellCheck, autoRestore);
 
     saveConfig();
 }
@@ -283,7 +289,7 @@ void MainWindow::loadConfig() {
         preeditFile.close();
     } else {
         // Default list
-        QString defaults = "kitty\nalacritty\nkonsole\ngnome-terminal\nxfce4-terminal\nlxterminal\nstudio\njava";
+        QString defaults = "kitty\nalacritty\nkonsole\ngnome-terminal\nxfce4-terminal\nlxterminal\nandroid-studio\njava";
         m_preeditAppsTextEdit->setPlainText(defaults);
         QDir().mkpath(QFileInfo(preeditPath).absolutePath());
         if (preeditFile.open(QIODevice::WriteOnly | QIODevice::Text)) {

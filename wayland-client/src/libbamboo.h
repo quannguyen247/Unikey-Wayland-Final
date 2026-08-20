@@ -12,6 +12,8 @@
 
 #ifndef GO_CGO_GOSTRING_TYPEDEF
 typedef struct { const char *p; ptrdiff_t n; } _GoString_;
+extern size_t _GoStringLen(_GoString_ s);
+extern const char *_GoStringPtr(_GoString_ s);
 #endif
 
 #endif
@@ -51,9 +53,15 @@ typedef size_t GoUintptr;
 typedef float GoFloat32;
 typedef double GoFloat64;
 #ifdef _MSC_VER
+#if !defined(__cplusplus) || _MSVC_LANG <= 201402L
 #include <complex.h>
 typedef _Fcomplex GoComplex64;
 typedef _Dcomplex GoComplex128;
+#else
+#include <complex>
+typedef std::complex<float> GoComplex64;
+typedef std::complex<double> GoComplex128;
+#endif
 #else
 typedef float _Complex GoComplex64;
 typedef double _Complex GoComplex128;
@@ -81,14 +89,15 @@ typedef struct { void *data; GoInt len; GoInt cap; } GoSlice;
 extern "C" {
 #endif
 
-extern void Bamboo_Init();
+extern void Bamboo_Init(void);
 extern void Bamboo_SetInputMethod(int method);
+extern void Bamboo_SetOptions(_Bool freeMarking, _Bool modernStyle, _Bool spellCheck, _Bool autoRestore);
 extern _Bool Bamboo_CanProcessKey(uint32_t key);
 extern void Bamboo_ProcessKey(uint32_t key);
-extern void Bamboo_RemoveLastChar();
-extern char* Bamboo_GetPreeditString();
-extern char* Bamboo_GetCommitString();
-extern void Bamboo_Reset();
+extern void Bamboo_RemoveLastChar(void);
+extern char* Bamboo_GetPreeditString(void);
+extern char* Bamboo_GetCommitString(void);
+extern void Bamboo_Reset(void);
 
 #ifdef __cplusplus
 }
