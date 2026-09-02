@@ -119,7 +119,7 @@ MainWindow::MainWindow(bool* p_viet_mode, bool is_gnome, QWidget *parent)
     // --- Tab Danh sách loại trừ ---
     QWidget* tabExclude = new QWidget();
     QVBoxLayout* excludeLayout = new QVBoxLayout(tabExclude);
-    QLabel* excludeLabel = new QLabel("Các ứng dụng cần hiện gạch chân khi đang gõ:\n(Một dòng cho mỗi ứng dụng, ví dụ: kitty, android-studio, java)");
+    QLabel* excludeLabel = new QLabel("Các ứng dụng cần dùng gạch chân (Preedit):\n(Một dòng cho mỗi ứng dụng, ví dụ: kitty, android-studio, java)");
     m_preeditAppsTextEdit = new QPlainTextEdit(this);
     excludeLayout->addWidget(excludeLabel);
     excludeLayout->addWidget(m_preeditAppsTextEdit);
