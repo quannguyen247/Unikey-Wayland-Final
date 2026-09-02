@@ -2,6 +2,7 @@
 #define TEXT_TRANSACTION_H
 
 #include <algorithm>
+#include <cstddef>
 #include <cstdint>
 #include <limits>
 #include <string>
@@ -12,6 +13,13 @@ struct SurroundingReplacement {
     size_t start = 0;
     size_t end = 0;
     bool uses_surrounding = false;
+};
+
+struct SurroundingSnapshot {
+    std::string text;
+    uint32_t cursor = 0;
+    uint32_t anchor = 0;
+    bool valid = false;
 };
 
 inline size_t utf8_common_prefix_bytes(const std::string& left, const std::string& right) {
@@ -67,6 +75,64 @@ inline SurroundingReplacement make_surrounding_replacement(size_t old_tail_bytes
     result.end = selection_end;
     result.uses_surrounding = true;
     return result;
+}
+
+inline SurroundingSnapshot apply_surrounding_replacement(
+    const std::string& text,
+    uint32_t cursor,
+    uint32_t anchor,
+    const SurroundingReplacement& replacement,
+    const std::string& inserted_text) {
+    SurroundingSnapshot result;
+    if (!replacement.uses_surrounding || replacement.start > replacement.end ||
+        replacement.end > text.size()) {
+        return result;
+    }
+
+    result.text = text;
+    result.text.replace(replacement.start,
+                        replacement.end - replacement.start,
+                        inserted_text);
+    result.cursor = static_cast<uint32_t>(replacement.start + inserted_text.size());
+    result.anchor = result.cursor;
+    result.valid = true;
+    return result;
+}
+
+inline bool surrounding_matches(const SurroundingSnapshot& expected,
+                                const std::string& text,
+                                uint32_t cursor,
+                                uint32_t anchor) {
+    return expected.valid && expected.text == text &&
+           expected.cursor == cursor && expected.anchor == anchor;
+}
+
+inline SurroundingSnapshot apply_forwarded_key(const SurroundingSnapshot& snapshot,
+                                               char key) {
+    if (!snapshot.valid || snapshot.cursor > snapshot.text.size() ||
+        snapshot.anchor > snapshot.text.size()) {
+        return {};
+    }
+
+    size_t old_tail_bytes = 0;
+    std::string inserted_text(1, key);
+    const size_t insertion = std::min<size_t>(snapshot.cursor, snapshot.anchor);
+    if (key == '\b') {
+        inserted_text.clear();
+        if (snapshot.cursor == snapshot.anchor && insertion > 0) {
+            size_t previous = insertion - 1;
+            while (previous > 0 &&
+                   (static_cast<unsigned char>(snapshot.text[previous]) & 0xC0) == 0x80) {
+                --previous;
+            }
+            old_tail_bytes = insertion - previous;
+        }
+    }
+
+    const auto replacement = make_surrounding_replacement(
+        old_tail_bytes, snapshot.text, snapshot.cursor, snapshot.anchor);
+    return apply_surrounding_replacement(
+        snapshot.text, snapshot.cursor, snapshot.anchor, replacement, inserted_text);
 }
 
 #endif // TEXT_TRANSACTION_H

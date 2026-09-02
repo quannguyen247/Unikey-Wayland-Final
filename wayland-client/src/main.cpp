@@ -8,6 +8,7 @@
 #include <sstream>
 #include <cstdint>
 #include <cstdlib>
+#include <vector>
 
 static void log_to_file(const std::string& msg) {
     static const bool enabled = [] {
@@ -51,10 +52,10 @@ struct WaylandState {
     uint32_t surrounding_cursor = 0;
     uint32_t surrounding_anchor = 0;
     bool has_surrounding_text = false;
-    bool surrounding_dirty = false;
-    uint32_t surrounding_serial = 0;
-    uint32_t last_edit_serial = 0;
     bool edit_pending = false;
+    SurroundingSnapshot pending_expected;
+    std::vector<SurroundingSnapshot> pending_failures;
+    unsigned repair_attempts = 0;
 };
 
 // Evdev keycodes map
@@ -125,52 +126,61 @@ static void reset_composition(WaylandState* state, bool clear_client_preedit = f
 }
 
 static bool has_fresh_surrounding(const WaylandState* state) {
-    return state->has_surrounding_text &&
-           (!state->edit_pending || state->surrounding_serial != state->last_edit_serial);
+    return state->has_surrounding_text && !state->edit_pending;
 }
 
-static void note_text_edit(WaylandState* state) {
-    state->last_edit_serial = state->latest_serial;
+static void use_expected_surrounding(WaylandState* state,
+                                     const SurroundingSnapshot& expected) {
+    if (!expected.valid) return;
+    state->surrounding_text = expected.text;
+    state->surrounding_cursor = expected.cursor;
+    state->surrounding_anchor = expected.anchor;
+    state->pending_expected = expected;
     state->edit_pending = true;
 }
 
-static void predict_surrounding_edit(WaylandState* state,
-                                     const SurroundingReplacement& replacement,
-                                     size_t old_tail_bytes,
-                                     const std::string& suffix) {
-    if (!state->has_surrounding_text) return;
+static bool same_snapshot(const SurroundingSnapshot& left,
+                          const SurroundingSnapshot& right) {
+    return left.valid == right.valid && left.text == right.text &&
+           left.cursor == right.cursor && left.anchor == right.anchor;
+}
 
-    size_t start = 0;
-    size_t end = 0;
-    if (replacement.uses_surrounding) {
-        start = replacement.start;
-        end = replacement.end;
-    } else {
-        const size_t selection_start = std::min<size_t>(state->surrounding_cursor,
-                                                        state->surrounding_anchor);
-        const size_t selection_end = std::max<size_t>(state->surrounding_cursor,
-                                                      state->surrounding_anchor);
-        if (state->surrounding_cursor > state->surrounding_text.size() ||
-            state->surrounding_anchor > state->surrounding_text.size() ||
-            old_tail_bytes > selection_start) {
-            return;
-        }
-        start = selection_start - old_tail_bytes;
-        end = selection_end;
+static void add_failure_snapshot(std::vector<SurroundingSnapshot>& failures,
+                                 const SurroundingSnapshot& failure,
+                                 const SurroundingSnapshot& expected) {
+    if (!failure.valid || same_snapshot(failure, expected)) return;
+    for (const auto& existing : failures) {
+        if (same_snapshot(existing, failure)) return;
     }
+    if (failures.size() < 4) failures.push_back(failure);
+}
 
-    state->surrounding_text.replace(start, end - start, suffix);
-    const size_t cursor = start + suffix.size();
-    state->surrounding_cursor = static_cast<uint32_t>(cursor);
-    state->surrounding_anchor = static_cast<uint32_t>(cursor);
+static void clear_pending_edit(WaylandState* state) {
+    state->edit_pending = false;
+    state->pending_expected = {};
+    state->pending_failures.clear();
+    state->repair_attempts = 0;
+}
+
+static void predict_forwarded_key(WaylandState* state, char c) {
+    if (!state->edit_pending) return;
+
+    const auto expected = apply_forwarded_key(state->pending_expected, c);
+    std::vector<SurroundingSnapshot> failures;
+    for (const auto& failure : state->pending_failures) {
+        add_failure_snapshot(failures, apply_forwarded_key(failure, c), expected);
+    }
+    use_expected_surrounding(state, expected);
+    state->pending_failures = std::move(failures);
 }
 
 static void replace_native_composition(WaylandState* state,
-                                       const std::string& new_composition) {
+                                       const std::string& new_composition,
+                                       const std::string& trailing_text = "") {
     const std::string old_composition = state->composed_word;
     const size_t common = utf8_common_prefix_bytes(old_composition, new_composition);
     const size_t old_tail_bytes = old_composition.size() - common;
-    const std::string suffix = new_composition.substr(common);
+    const std::string suffix = new_composition.substr(common) + trailing_text;
 
     if (old_tail_bytes == 0 && suffix.empty()) {
         state->composed_word = new_composition;
@@ -188,6 +198,27 @@ static void replace_native_composition(WaylandState* state,
         replacement.length = static_cast<uint32_t>(old_tail_bytes);
     }
 
+    const auto expected = apply_surrounding_replacement(
+        state->surrounding_text, state->surrounding_cursor,
+        state->surrounding_anchor, replacement, suffix);
+    std::vector<SurroundingSnapshot> failures;
+    for (const auto& previous_failure : state->pending_failures) {
+        const auto failure_replacement = make_surrounding_replacement(
+            old_tail_bytes, previous_failure.text,
+            previous_failure.cursor, previous_failure.anchor);
+        add_failure_snapshot(failures, apply_surrounding_replacement(
+            previous_failure.text, previous_failure.cursor,
+            previous_failure.anchor, failure_replacement, suffix), expected);
+    }
+    if (old_tail_bytes > 0) {
+        const auto insert_only = make_surrounding_replacement(
+            0, state->surrounding_text,
+            state->surrounding_cursor, state->surrounding_anchor);
+        add_failure_snapshot(failures, apply_surrounding_replacement(
+            state->surrounding_text, state->surrounding_cursor,
+            state->surrounding_anchor, insert_only, suffix), expected);
+    }
+
     if (old_tail_bytes > 0) {
         zwp_input_method_context_v1_delete_surrounding_text(
             state->context, replacement.index, replacement.length);
@@ -196,9 +227,50 @@ static void replace_native_composition(WaylandState* state,
     // An empty commit still applies the pending deletion.
     zwp_input_method_context_v1_commit_string(
         state->context, state->latest_serial, suffix.c_str());
-    predict_surrounding_edit(state, replacement, old_tail_bytes, suffix);
-    note_text_edit(state);
+    use_expected_surrounding(state, expected);
+    state->pending_failures = std::move(failures);
+    state->repair_attempts = 0;
     state->composed_word = new_composition;
+}
+
+static bool repair_failed_edit(WaylandState* state,
+                               const std::string& text,
+                               uint32_t cursor,
+                               uint32_t anchor) {
+    if (state->repair_attempts >= 3 || !state->pending_expected.valid ||
+        cursor > text.size() || anchor > text.size()) {
+        return false;
+    }
+
+    const size_t insertion = std::min<size_t>(cursor, anchor);
+    const size_t expected_insertion = std::min<size_t>(
+        state->pending_expected.cursor, state->pending_expected.anchor);
+    const std::string actual_prefix = text.substr(0, insertion);
+    const std::string expected_prefix = state->pending_expected.text.substr(
+        0, expected_insertion);
+    const size_t common = utf8_common_prefix_bytes(actual_prefix, expected_prefix);
+    const size_t old_tail_bytes = insertion - common;
+    const std::string replacement_text = expected_prefix.substr(common);
+    const auto replacement = make_surrounding_replacement(
+        old_tail_bytes, text, cursor, anchor);
+    if (!replacement.uses_surrounding) return false;
+
+    if (old_tail_bytes > 0) {
+        zwp_input_method_context_v1_delete_surrounding_text(
+            state->context, replacement.index, replacement.length);
+    }
+    zwp_input_method_context_v1_commit_string(
+        state->context, state->latest_serial, replacement_text.c_str());
+
+    const auto insert_only = make_surrounding_replacement(0, text, cursor, anchor);
+    std::vector<SurroundingSnapshot> failures;
+    add_failure_snapshot(failures, apply_surrounding_replacement(
+        text, cursor, anchor, insert_only, replacement_text),
+        state->pending_expected);
+    state->pending_failures = std::move(failures);
+    use_expected_surrounding(state, state->pending_expected);
+    ++state->repair_attempts;
+    return true;
 }
 
 static std::string bamboo_string(bool final) {
@@ -422,12 +494,14 @@ static void keyboard_key(void* data, struct wl_keyboard* keyboard, uint32_t seri
 
             if (c == '\b') {
                 if (state->composed_word.empty()) {
+                    predict_forwarded_key(state, c);
                     zwp_input_method_context_v1_key(state->context, serial, time, key, state_key);
                     return;
                 }
                 Bamboo_RemoveLastChar();
             } else if (!Bamboo_CanProcessKey(c)) {
                 std::string final_word = bamboo_string(true);
+                const bool had_composition = !state->composed_word.empty();
                 
                 // Gõ tắt (Macro)
                 if (g_mainWindow && g_mainWindow->isMacroEnabled()) {
@@ -438,8 +512,16 @@ static void keyboard_key(void* data, struct wl_keyboard* keyboard, uint32_t seri
                     }
                 }
 
+                if (had_composition && c != '\n') {
+                    replace_native_composition(state, final_word, std::string(1, c));
+                    reset_composition(state);
+                    eaten_keys.insert(key);
+                    return;
+                }
+
                 replace_native_composition(state, final_word);
                 reset_composition(state);
+                predict_forwarded_key(state, c);
                 zwp_input_method_context_v1_key(state->context, serial, time, key, state_key);
                 return;
             } else {
@@ -461,6 +543,7 @@ static void keyboard_key(void* data, struct wl_keyboard* keyboard, uint32_t seri
             reset_composition(state);
         } else {
             reset_composition(state);
+            clear_pending_edit(state);
         }
     }
     
@@ -498,20 +581,31 @@ static const struct wl_keyboard_listener keyboard_listener = {
 
 static void input_method_context_surrounding_text(void* data, struct zwp_input_method_context_v1* context, const char* text, uint32_t cursor, uint32_t anchor) {
     WaylandState* state = (WaylandState*)data;
-    if (text) state->surrounding_text = text;
-    else state->surrounding_text = "";
+    const std::string reported_text = text ? text : "";
+
+    if (state->edit_pending && !surrounding_matches(
+            state->pending_expected, reported_text, cursor, anchor)) {
+        for (const auto& failure : state->pending_failures) {
+            if (surrounding_matches(failure, reported_text, cursor, anchor)) {
+                repair_failed_edit(state, reported_text, cursor, anchor);
+                break;
+            }
+        }
+        return;
+    }
+
+    state->surrounding_text = reported_text;
     state->surrounding_cursor = cursor;
     state->surrounding_anchor = anchor;
     state->has_surrounding_text = true;
-    state->surrounding_dirty = true;
+    clear_pending_edit(state);
 }
 static void input_method_context_reset(void* data, struct zwp_input_method_context_v1* context) {
     WaylandState* state = static_cast<WaylandState*>(data);
     if (state) {
         reset_composition(state);
         state->has_surrounding_text = false;
-        state->surrounding_dirty = false;
-        state->edit_pending = false;
+        clear_pending_edit(state);
     }
 }
 static void input_method_context_content_type(void* data, struct zwp_input_method_context_v1* context, uint32_t hint, uint32_t purpose) {
@@ -528,13 +622,6 @@ static void input_method_context_invoke_action(void* data, struct zwp_input_meth
 static void input_method_context_commit_state(void* data, struct zwp_input_method_context_v1* context, uint32_t serial) {
     WaylandState* state = static_cast<WaylandState*>(data);
     state->latest_serial = serial;
-    if (state->surrounding_dirty) {
-        state->surrounding_serial = serial;
-        state->surrounding_dirty = false;
-    }
-    if (state->edit_pending && serial != state->last_edit_serial) {
-        state->edit_pending = false;
-    }
 }
 
 static void input_method_context_preferred_language(void* data, struct zwp_input_method_context_v1* context, const char* language) {}
@@ -562,8 +649,7 @@ static void input_method_activate(void* data, struct zwp_input_method_v1* input_
     reset_composition(state);
     state->content_purpose = 0;
     state->has_surrounding_text = false;
-    state->surrounding_dirty = false;
-    state->edit_pending = false;
+    clear_pending_edit(state);
 
     if (state->keyboard) {
         wl_proxy_destroy((struct wl_proxy*)state->keyboard);
@@ -597,8 +683,7 @@ static void input_method_deactivate(void* data, struct zwp_input_method_v1* inpu
     eaten_keys.clear();
     reset_composition(state);
     state->has_surrounding_text = false;
-    state->surrounding_dirty = false;
-    state->edit_pending = false;
+    clear_pending_edit(state);
     
     if (state->keyboard) {
         wl_proxy_destroy((struct wl_proxy*)state->keyboard);
@@ -684,6 +769,8 @@ int main(int argc, char **argv) {
         g_app_excluded = windowTracker.isAppExcluded(windowClass.toStdString());
         if (was_excluded != g_app_excluded) {
             reset_composition(&state, true);
+            clear_pending_edit(&state);
+            state.has_surrounding_text = false;
         }
         if (g_app_excluded) {
             std::stringstream ss;
