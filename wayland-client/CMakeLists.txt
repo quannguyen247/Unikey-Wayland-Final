@@ -48,7 +48,6 @@ set(UK_SOURCES
     src/macrodialog.cpp
     src/windowtracker.cpp
     src/main.cpp
-    src/text_transaction.h
 )
 add_executable(unikey-wayland
     ${UK_SOURCES}
@@ -95,9 +94,6 @@ install(FILES ../io.github.ubuntu2310fake.UnikeyWayland.svg DESTINATION share/ic
 
 include(CTest)
 if (BUILD_TESTING)
-    add_executable(text-transaction-test tests/text_transaction_test.cpp)
-    target_include_directories(text-transaction-test PRIVATE src)
-    add_test(NAME text-transaction-test COMMAND text-transaction-test)
     add_test(
         NAME bamboo-wrapper-test
         COMMAND ${GO_BIN} test -mod=vendor bamboo_wrapper.go bamboo_wrapper_test.go
