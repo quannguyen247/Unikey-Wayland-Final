@@ -3,13 +3,19 @@
 #include <string.h>
 #include <iostream>
 #include <algorithm>
-#include <vector>
-#include <map>
 #include <set>
 #include <fstream>
 #include <sstream>
+#include <cstdint>
+#include <cstdlib>
 
 static void log_to_file(const std::string& msg) {
+    static const bool enabled = [] {
+        const char* value = getenv("UNIKEY_WAYLAND_DEBUG");
+        return value && strcmp(value, "0") != 0;
+    }();
+    if (!enabled) return;
+
     std::ofstream f("/tmp/uk_debug.log", std::ios::app);
     if (f.is_open()) {
         f << msg << std::endl;
@@ -18,7 +24,6 @@ static void log_to_file(const std::string& msg) {
 
 #include <QApplication>
 #include <QSocketNotifier>
-#include <thread>
 #include "mainwindow.h"
 #include "trayicon.h"
 
@@ -26,6 +31,7 @@ static void log_to_file(const std::string& msg) {
 // No ukengine_wrapper needed
 #include "windowtracker.h"
 #include "libbamboo.h"
+#include "text_transaction.h"
 
 struct WaylandState {
     wl_display* display;
@@ -39,62 +45,17 @@ struct WaylandState {
     bool active;
     uint32_t latest_serial;
     std::string composed_word = "";
-    std::vector<char> raw_keys_normal;
     uint32_t content_purpose = 0;
     
     std::string surrounding_text = "";
     uint32_t surrounding_cursor = 0;
     uint32_t surrounding_anchor = 0;
     bool has_surrounding_text = false;
+    bool surrounding_dirty = false;
+    uint32_t surrounding_serial = 0;
+    uint32_t last_edit_serial = 0;
+    bool edit_pending = false;
 };
-
-static void pop_utf8_char(std::string& str) {
-    if (str.empty()) return;
-    while (!str.empty()) {
-        unsigned char c = str.back();
-        str.pop_back();
-        if ((c & 0xC0) != 0x80) break;
-    }
-}
-
-static int utf8_length(const std::string& str) {
-    int len = 0;
-    for (size_t i = 0; i < str.length(); ++i) {
-        if ((str[i] & 0xC0) != 0x80) len++;
-    }
-    return len;
-}
-
-static int utf8_common_prefix(const std::string& s1, const std::string& s2) {
-    int common = 0;
-    size_t i = 0, j = 0;
-    while (i < s1.length() && j < s2.length()) {
-        int len1 = 1, len2 = 1;
-        while (i + len1 < s1.length() && (s1[i + len1] & 0xC0) == 0x80) len1++;
-        while (j + len2 < s2.length() && (s2[j + len2] & 0xC0) == 0x80) len2++;
-        
-        if (len1 == len2 && s1.substr(i, len1) == s2.substr(j, len2)) {
-            common++;
-            i += len1;
-            j += len2;
-        } else {
-            break;
-        }
-    }
-    return common;
-}
-
-static std::string utf8_substring(const std::string& str, int start_char) {
-    size_t i = 0;
-    int chars = 0;
-    while (i < str.length() && chars < start_char) {
-        int len = 1;
-        while (i + len < str.length() && (str[i + len] & 0xC0) == 0x80) len++;
-        i += len;
-        chars++;
-    }
-    return str.substr(i);
-}
 
 // Evdev keycodes map
 static char get_ascii_from_keycode(uint32_t key, uint32_t mods) {
@@ -152,6 +113,101 @@ WindowTracker* g_windowTracker = nullptr;
 
 static bool g_app_excluded = false;
 
+static void reset_composition(WaylandState* state, bool clear_client_preedit = false) {
+    Bamboo_Reset();
+    if (state) {
+        if (clear_client_preedit && state->context && !state->composed_word.empty()) {
+            zwp_input_method_context_v1_preedit_string(
+                state->context, state->latest_serial, "", "");
+        }
+        state->composed_word.clear();
+    }
+}
+
+static bool has_fresh_surrounding(const WaylandState* state) {
+    return state->has_surrounding_text &&
+           (!state->edit_pending || state->surrounding_serial != state->last_edit_serial);
+}
+
+static void note_text_edit(WaylandState* state) {
+    state->last_edit_serial = state->latest_serial;
+    state->edit_pending = true;
+}
+
+static void predict_surrounding_edit(WaylandState* state,
+                                     const SurroundingReplacement& replacement,
+                                     size_t old_tail_bytes,
+                                     const std::string& suffix) {
+    if (!state->has_surrounding_text) return;
+
+    size_t start = 0;
+    size_t end = 0;
+    if (replacement.uses_surrounding) {
+        start = replacement.start;
+        end = replacement.end;
+    } else {
+        const size_t selection_start = std::min<size_t>(state->surrounding_cursor,
+                                                        state->surrounding_anchor);
+        const size_t selection_end = std::max<size_t>(state->surrounding_cursor,
+                                                      state->surrounding_anchor);
+        if (state->surrounding_cursor > state->surrounding_text.size() ||
+            state->surrounding_anchor > state->surrounding_text.size() ||
+            old_tail_bytes > selection_start) {
+            return;
+        }
+        start = selection_start - old_tail_bytes;
+        end = selection_end;
+    }
+
+    state->surrounding_text.replace(start, end - start, suffix);
+    const size_t cursor = start + suffix.size();
+    state->surrounding_cursor = static_cast<uint32_t>(cursor);
+    state->surrounding_anchor = static_cast<uint32_t>(cursor);
+}
+
+static void replace_native_composition(WaylandState* state,
+                                       const std::string& new_composition) {
+    const std::string old_composition = state->composed_word;
+    const size_t common = utf8_common_prefix_bytes(old_composition, new_composition);
+    const size_t old_tail_bytes = old_composition.size() - common;
+    const std::string suffix = new_composition.substr(common);
+
+    if (old_tail_bytes == 0 && suffix.empty()) {
+        state->composed_word = new_composition;
+        return;
+    }
+
+    SurroundingReplacement replacement;
+    if (state->has_surrounding_text) {
+        replacement = make_surrounding_replacement(old_tail_bytes,
+                                                   state->surrounding_text,
+                                                   state->surrounding_cursor,
+                                                   state->surrounding_anchor);
+    } else {
+        replacement.index = -static_cast<int32_t>(old_tail_bytes);
+        replacement.length = static_cast<uint32_t>(old_tail_bytes);
+    }
+
+    if (old_tail_bytes > 0) {
+        zwp_input_method_context_v1_delete_surrounding_text(
+            state->context, replacement.index, replacement.length);
+    }
+
+    // An empty commit still applies the pending deletion.
+    zwp_input_method_context_v1_commit_string(
+        state->context, state->latest_serial, suffix.c_str());
+    predict_surrounding_edit(state, replacement, old_tail_bytes, suffix);
+    note_text_edit(state);
+    state->composed_word = new_composition;
+}
+
+static std::string bamboo_string(bool final) {
+    char* value = final ? Bamboo_GetCommitString() : Bamboo_GetPreeditString();
+    std::string result = value ? value : "";
+    if (value) free(value);
+    return result;
+}
+
 void show_main_window() {
     if (g_mainWindow) {
         QMetaObject::invokeMethod(g_mainWindow, []() {
@@ -201,6 +257,7 @@ static void keyboard_key(void* data, struct wl_keyboard* keyboard, uint32_t seri
         int switchKeyConfig = g_mainWindow ? g_mainWindow->getSwitchKey() : 0;
         if (key == 29 || key == 97) {
             if (switchKeyConfig == 0 && g_ctrl_pressed && g_shift_pressed && !g_other_pressed && !g_switched) {
+                reset_composition(state, true);
                 if (g_mainWindow) {
                     g_mainWindow->setVietMode(!state->viet_mode);
                 } else {
@@ -215,6 +272,7 @@ static void keyboard_key(void* data, struct wl_keyboard* keyboard, uint32_t seri
             }
         } else if (key == 42 || key == 54) {
             if (switchKeyConfig == 0 && g_ctrl_pressed && g_shift_pressed && !g_other_pressed && !g_switched) {
+                reset_composition(state, true);
                 if (g_mainWindow) {
                     g_mainWindow->setVietMode(!state->viet_mode);
                 } else {
@@ -239,6 +297,7 @@ static void keyboard_key(void* data, struct wl_keyboard* keyboard, uint32_t seri
     int switchKeyConfig = g_mainWindow ? g_mainWindow->getSwitchKey() : 0;
     bool real_alt_pressed = (g_modifiers & 8) != 0; // Better check to avoid sticky Alt bug
     if (switchKeyConfig == 1 && key == 44 && real_alt_pressed && state_key == 1) {
+        reset_composition(state, true);
         if (g_mainWindow) {
             g_mainWindow->setVietMode(!state->viet_mode);
         } else {
@@ -279,8 +338,7 @@ static void keyboard_key(void* data, struct wl_keyboard* keyboard, uint32_t seri
 
     if (!state->viet_mode) {
         log_to_file("DEBUG: Forwarding in E mode");
-        Bamboo_Reset();
-        state->composed_word.clear();
+        reset_composition(state, true);
         zwp_input_method_context_v1_key(state->context, serial, time, key, state_key);
         return;
     }
@@ -310,29 +368,28 @@ static void keyboard_key(void* data, struct wl_keyboard* keyboard, uint32_t seri
                     zwp_input_method_context_v1_preedit_styling(state->context, 0, byte_len, 5);
                     zwp_input_method_context_v1_preedit_string(state->context, state->latest_serial, new_preedit, new_preedit);
                 }
+                state->composed_word = new_preedit ? new_preedit : "";
                 if (new_preedit) free(new_preedit);
                 eaten_keys.insert(key);
                 return;
             }
             
             if (!Bamboo_CanProcessKey(c)) {
-                char* commit_str = Bamboo_GetCommitString();
-                zwp_input_method_context_v1_preedit_string(state->context, state->latest_serial, "", "");
-                std::string final_commit = commit_str ? commit_str : "";
-                if (commit_str) free(commit_str);
+                std::string final_commit = bamboo_string(true);
                 
                 // Gõ tắt (Macro)
                 if (g_mainWindow && g_mainWindow->isMacroEnabled()) {
-                    auto macros = g_mainWindow->getMacros();
-                    if (macros.find(final_commit) != macros.end()) {
-                        final_commit = macros[final_commit];
+                    const auto& macros = g_mainWindow->getMacros();
+                    auto macro = macros.find(final_commit);
+                    if (macro != macros.end()) {
+                        final_commit = macro->second;
                     }
                 }
                 
                 if (final_commit.length() > 0) {
                     zwp_input_method_context_v1_commit_string(state->context, state->latest_serial, final_commit.c_str());
                 }
-                Bamboo_Reset();
+                reset_composition(state);
                 
                 zwp_input_method_context_v1_key(state->context, serial, time, key, state_key);
                 return;
@@ -348,12 +405,21 @@ static void keyboard_key(void* data, struct wl_keyboard* keyboard, uint32_t seri
                 zwp_input_method_context_v1_preedit_cursor(state->context, byte_len);
                 zwp_input_method_context_v1_preedit_styling(state->context, 0, byte_len, 5);
                 zwp_input_method_context_v1_preedit_string(state->context, state->latest_serial, preedit_str, preedit_str);
+                state->composed_word = preedit_str;
                 free(preedit_str);
                 eaten_keys.insert(key);
                 return;
             }
         } else {
             // Normal Mode (Chrome, Gtk, Qt apps) - Use Bamboo Diffing
+            if (has_fresh_surrounding(state) &&
+                !composition_matches_surrounding(state->surrounding_text,
+                                                 state->surrounding_cursor,
+                                                 state->surrounding_anchor,
+                                                 state->composed_word)) {
+                reset_composition(state);
+            }
+
             if (c == '\b') {
                 if (state->composed_word.empty()) {
                     zwp_input_method_context_v1_key(state->context, serial, time, key, state_key);
@@ -361,100 +427,40 @@ static void keyboard_key(void* data, struct wl_keyboard* keyboard, uint32_t seri
                 }
                 Bamboo_RemoveLastChar();
             } else if (!Bamboo_CanProcessKey(c)) {
-                std::string current_word = state->composed_word;
-                Bamboo_Reset();
-                state->composed_word.clear();
+                std::string final_word = bamboo_string(true);
                 
                 // Gõ tắt (Macro)
                 if (g_mainWindow && g_mainWindow->isMacroEnabled()) {
-                    auto macros = g_mainWindow->getMacros();
-                    if (macros.find(current_word) != macros.end()) {
-                        std::string macro_val = macros[current_word];
-                        int byte_backs = current_word.length();
-                        if (byte_backs > 0) {
-                            zwp_input_method_context_v1_delete_surrounding_text(state->context, -byte_backs, byte_backs);
-                        }
-                        zwp_input_method_context_v1_commit_string(state->context, state->latest_serial, macro_val.c_str());
+                    const auto& macros = g_mainWindow->getMacros();
+                    auto macro = macros.find(final_word);
+                    if (macro != macros.end()) {
+                        final_word = macro->second;
                     }
                 }
-                
+
+                replace_native_composition(state, final_word);
+                reset_composition(state);
                 zwp_input_method_context_v1_key(state->context, serial, time, key, state_key);
                 return;
             } else {
                 Bamboo_ProcessKey(c);
             }
-            
-            char* preedit_str = Bamboo_GetPreeditString();
-            std::string new_composed = preedit_str ? preedit_str : "";
-            if (preedit_str) free(preedit_str);
-            
-            int common_bytes = 0;
-            size_t i = 0, j = 0;
-            while (i < state->composed_word.length() && j < new_composed.length()) {
-                int len1 = 1, len2 = 1;
-                while (i + len1 < state->composed_word.length() && (state->composed_word[i + len1] & 0xC0) == 0x80) len1++;
-                while (j + len2 < new_composed.length() && (new_composed[j + len2] & 0xC0) == 0x80) len2++;
-                
-                if (len1 == len2 && state->composed_word.substr(i, len1) == new_composed.substr(j, len2)) {
-                    common_bytes += len1;
-                    i += len1;
-                    j += len2;
-                } else {
-                    break;
-                }
-            }
 
-            int byte_backs = state->composed_word.length() - common_bytes;
-            if (byte_backs > 0) {
-                // Giải pháp Hybrid:
-                // Trình duyệt Chrome có một lỗi toán học khiến delete_surrounding_text bị hỏng nếu có vùng bôi đen ngược.
-                // Do đó, nếu phát hiện có vùng bôi đen (Chrome Omnibox), ta dùng phím Backspace mô phỏng chỉ riêng cho lúc này.
-                // Các trường hợp gõ bình thường khác, ta vẫn dùng delete_surrounding_text để đảm bảo mượt mà 100%.
-                if (state->has_surrounding_text && state->surrounding_cursor != state->surrounding_anchor) {
-                    int chars_to_delete = 0;
-                    size_t idx = common_bytes;
-                    while (idx < state->composed_word.length()) {
-                        chars_to_delete++;
-                        idx++;
-                        while (idx < state->composed_word.length() && (state->composed_word[idx] & 0xC0) == 0x80) idx++;
-                    }
-                    // +1 Backspace để phá vỡ vùng bôi đen
-                    chars_to_delete++;
-                    for (int k = 0; k < chars_to_delete; k++) {
-                        zwp_input_method_context_v1_key(state->context, state->latest_serial, time, 14, 1);
-                        zwp_input_method_context_v1_key(state->context, state->latest_serial, time, 14, 0);
-                    }
-                    // Xóa bôi đen nội bộ để không bị lặp lại nếu Wayland chậm
-                    state->surrounding_cursor = state->surrounding_anchor;
-                } else {
-                    zwp_input_method_context_v1_delete_surrounding_text(state->context, -byte_backs, byte_backs);
-                }
-            }
-
-            std::string suffix = new_composed.substr(common_bytes);
-            if (!suffix.empty()) {
-                zwp_input_method_context_v1_commit_string(state->context, state->latest_serial, suffix.c_str());
-            }
-
-            // Đã commit_string ở trên rồi nên không cần làm gì thêm ở đây nữa
-            state->composed_word = new_composed;
+            replace_native_composition(state, bamboo_string(false));
             eaten_keys.insert(key);
             return;
         }
     } else {
         // c == 0 (Phím chức năng, phím tắt Ctrl, Alt, Arrow, Esc...)
         if (state->content_purpose == 12 || g_app_excluded) {
-            char* preedit = Bamboo_GetPreeditString();
-            if (preedit && strlen(preedit) > 0) {
-                zwp_input_method_context_v1_commit_string(state->context, state->latest_serial, preedit);
-                zwp_input_method_context_v1_preedit_string(state->context, state->latest_serial, "", "");
-                Bamboo_Reset();
+            std::string final_commit = bamboo_string(true);
+            if (!final_commit.empty()) {
+                zwp_input_method_context_v1_commit_string(
+                    state->context, state->latest_serial, final_commit.c_str());
             }
-            if (preedit) free(preedit);
+            reset_composition(state);
         } else {
-            Bamboo_Reset();
-            state->composed_word.clear();
-            state->raw_keys_normal.clear();
+            reset_composition(state);
         }
     }
     
@@ -497,12 +503,15 @@ static void input_method_context_surrounding_text(void* data, struct zwp_input_m
     state->surrounding_cursor = cursor;
     state->surrounding_anchor = anchor;
     state->has_surrounding_text = true;
+    state->surrounding_dirty = true;
 }
 static void input_method_context_reset(void* data, struct zwp_input_method_context_v1* context) {
     WaylandState* state = static_cast<WaylandState*>(data);
     if (state) {
-        Bamboo_Reset();
-        state->composed_word.clear();
+        reset_composition(state);
+        state->has_surrounding_text = false;
+        state->surrounding_dirty = false;
+        state->edit_pending = false;
     }
 }
 static void input_method_context_content_type(void* data, struct zwp_input_method_context_v1* context, uint32_t hint, uint32_t purpose) {
@@ -519,6 +528,13 @@ static void input_method_context_invoke_action(void* data, struct zwp_input_meth
 static void input_method_context_commit_state(void* data, struct zwp_input_method_context_v1* context, uint32_t serial) {
     WaylandState* state = static_cast<WaylandState*>(data);
     state->latest_serial = serial;
+    if (state->surrounding_dirty) {
+        state->surrounding_serial = serial;
+        state->surrounding_dirty = false;
+    }
+    if (state->edit_pending && serial != state->last_edit_serial) {
+        state->edit_pending = false;
+    }
 }
 
 static void input_method_context_preferred_language(void* data, struct zwp_input_method_context_v1* context, const char* language) {}
@@ -542,6 +558,12 @@ static void input_method_activate(void* data, struct zwp_input_method_v1* input_
     g_shift_pressed = false;
     g_alt_pressed = false;
     g_other_pressed = false;
+    eaten_keys.clear();
+    reset_composition(state);
+    state->content_purpose = 0;
+    state->has_surrounding_text = false;
+    state->surrounding_dirty = false;
+    state->edit_pending = false;
 
     if (state->keyboard) {
         wl_proxy_destroy((struct wl_proxy*)state->keyboard);
@@ -572,6 +594,11 @@ static void input_method_deactivate(void* data, struct zwp_input_method_v1* inpu
     g_shift_pressed = false;
     g_alt_pressed = false;
     g_other_pressed = false;
+    eaten_keys.clear();
+    reset_composition(state);
+    state->has_surrounding_text = false;
+    state->surrounding_dirty = false;
+    state->edit_pending = false;
     
     if (state->keyboard) {
         wl_proxy_destroy((struct wl_proxy*)state->keyboard);
@@ -653,13 +680,15 @@ int main(int argc, char **argv) {
     WindowTracker windowTracker;
     g_windowTracker = &windowTracker;
     QObject::connect(&windowTracker, &WindowTracker::activeWindowChangedSignal, [&](const QString& windowClass) {
+        const bool was_excluded = g_app_excluded;
         g_app_excluded = windowTracker.isAppExcluded(windowClass.toStdString());
+        if (was_excluded != g_app_excluded) {
+            reset_composition(&state, true);
+        }
         if (g_app_excluded) {
             std::stringstream ss;
             ss << "DEBUG: Application excluded: " << windowClass.toStdString();
             log_to_file(ss.str());
-            state.composed_word.clear();
-            Bamboo_Reset();
         }
     });
 
@@ -682,15 +711,23 @@ int main(int argc, char **argv) {
 
     log_to_file("Wayland IM v1 Client started with Qt GUI. Waiting for events...");
 
+    QSocketNotifier* waylandNotifier = nullptr;
     if (state.display) {
-        std::thread wayland_thread([&state]() {
-            while (state.display) {
-                if (wl_display_dispatch(state.display) == -1) {
-                    break;
-                }
+        waylandNotifier = new QSocketNotifier(
+            wl_display_get_fd(state.display), QSocketNotifier::Read, &app);
+        QObject::connect(waylandNotifier, &QSocketNotifier::activated,
+                         [&state, &app, waylandNotifier]() {
+            if (wl_display_dispatch(state.display) == -1) {
+                waylandNotifier->setEnabled(false);
+                std::cerr << "Wayland display disconnected or error." << std::endl;
+                app.quit();
+                return;
             }
+            while (wl_display_dispatch_pending(state.display) > 0) {}
+            wl_display_flush(state.display);
         });
-        wayland_thread.detach();
+        while (wl_display_dispatch_pending(state.display) > 0) {}
+        wl_display_flush(state.display);
     }
 
     int ret = app.exec();

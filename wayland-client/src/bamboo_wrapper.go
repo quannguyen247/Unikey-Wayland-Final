@@ -13,6 +13,8 @@ import (
 var preeditor bamboo.IEngine
 var currentMethod string = "Telex"
 var currentFlags uint = bamboo.EfreeToneMarking
+var spellCheckEnabled bool
+var autoRestoreEnabled bool
 var rawKeys []rune
 
 func initEngine(methodName string) {
@@ -20,7 +22,7 @@ func initEngine(methodName string) {
 	defs := bamboo.GetInputMethodDefinitions()
 	im := bamboo.ParseInputMethod(defs, currentMethod)
 	preeditor = bamboo.NewEngine(im, currentFlags)
-	rawKeys = make([]rune, 0)
+	rawKeys = rawKeys[:0]
 }
 
 //export Bamboo_Init
@@ -61,9 +63,8 @@ func Bamboo_SetOptions(freeMarking C.bool, modernStyle C.bool, spellCheck C.bool
 	if !bool(modernStyle) {
 		flags |= bamboo.EstdToneStyle
 	}
-	if bool(spellCheck) {
-		flags |= bamboo.EautoCorrectEnabled
-	}
+	spellCheckEnabled = bool(spellCheck)
+	autoRestoreEnabled = bool(autoRestore)
 	currentFlags = flags
 	if preeditor != nil {
 		preeditor.SetFlag(currentFlags)
@@ -80,23 +81,50 @@ func Bamboo_CanProcessKey(key C.uint32_t) C.bool {
 
 //export Bamboo_ProcessKey
 func Bamboo_ProcessKey(key C.uint32_t) {
-	if preeditor != nil {
-        rawKeys = append(rawKeys, rune(key))
-		preeditor.ProcessKey(rune(key), bamboo.VietnameseMode)
-	}
+	processKey(rune(key))
 }
 
 //export Bamboo_RemoveLastChar
 func Bamboo_RemoveLastChar() {
+	removeLastKey()
+}
+
+func processKey(key rune) {
 	if preeditor != nil {
-        if len(rawKeys) > 0 {
-            rawKeys = rawKeys[:len(rawKeys)-1]
-            preeditor.Reset()
-            for _, k := range rawKeys {
-                preeditor.ProcessKey(k, bamboo.VietnameseMode)
-            }
-        }
+		rawKeys = append(rawKeys, key)
+		preeditor.ProcessKey(key, bamboo.VietnameseMode)
 	}
+}
+
+// Replay raw keys because a transformation may consume more than one key.
+func removeLastKey() {
+	if preeditor == nil || len(rawKeys) == 0 {
+		return
+	}
+	rawKeys = rawKeys[:len(rawKeys)-1]
+	preeditor.Reset()
+	for _, key := range rawKeys {
+		preeditor.ProcessKey(key, bamboo.VietnameseMode)
+	}
+}
+
+// Use the stricter validation only when the word is committed.
+func processedString(final bool) string {
+	if preeditor == nil {
+		return ""
+	}
+
+	vietnamese := preeditor.GetProcessedString(bamboo.VietnameseMode)
+	if !bamboo.HasAnyVietnameseRune(vietnamese) {
+		return vietnamese
+	}
+
+	invalidPartial := spellCheckEnabled && !preeditor.IsValid(false)
+	invalidFinal := final && autoRestoreEnabled && !preeditor.IsValid(true)
+	if invalidPartial || invalidFinal {
+		return preeditor.GetProcessedString(bamboo.EnglishMode)
+	}
+	return vietnamese
 }
 
 //export Bamboo_GetPreeditString
@@ -104,21 +132,18 @@ func Bamboo_GetPreeditString() *C.char {
 	if preeditor == nil {
 		return C.CString("")
 	}
-	vnSeq := preeditor.GetProcessedString(bamboo.VietnameseMode)
-    
-	return C.CString(vnSeq)
+	return C.CString(processedString(false))
 }
 
 //export Bamboo_GetCommitString
 func Bamboo_GetCommitString() *C.char {
-	// Commit string is the same as Preedit string right before reset
-	return Bamboo_GetPreeditString()
+	return C.CString(processedString(true))
 }
 
 //export Bamboo_Reset
 func Bamboo_Reset() {
 	if preeditor != nil {
-        rawKeys = make([]rune, 0)
+		rawKeys = rawKeys[:0]
 		preeditor.Reset()
 	}
 }
