@@ -8,8 +8,6 @@
 #include <sstream>
 #include <cstdint>
 #include <cstdlib>
-#include <deque>
-#include <utility>
 
 static void log_to_file(const std::string& msg) {
     static const bool enabled = [] {
@@ -26,7 +24,6 @@ static void log_to_file(const std::string& msg) {
 
 #include <QApplication>
 #include <QSocketNotifier>
-#include <QTimer>
 #include "mainwindow.h"
 #include "trayicon.h"
 
@@ -35,24 +32,6 @@ static void log_to_file(const std::string& msg) {
 #include "windowtracker.h"
 #include "libbamboo.h"
 #include "text_transaction.h"
-
-enum class PendingInputType {
-    Key,
-    Modifiers,
-};
-
-struct PendingInputEvent {
-    PendingInputType type;
-    wl_keyboard* keyboard = nullptr;
-    uint32_t serial = 0;
-    uint32_t time = 0;
-    uint32_t key = 0;
-    uint32_t state = 0;
-    uint32_t mods_depressed = 0;
-    uint32_t mods_latched = 0;
-    uint32_t mods_locked = 0;
-    uint32_t group = 0;
-};
 
 struct WaylandState {
     wl_display* display;
@@ -72,15 +51,10 @@ struct WaylandState {
     uint32_t surrounding_cursor = 0;
     uint32_t surrounding_anchor = 0;
     bool has_surrounding_text = false;
+    bool surrounding_dirty = false;
+    uint32_t surrounding_serial = 0;
+    uint32_t last_edit_serial = 0;
     bool edit_pending = false;
-    std::deque<PendingInputEvent> pending_events;
-    SurroundingSnapshot pending_expected;
-    SurroundingSnapshot pending_delete_dropped;
-    std::string pending_desired_tail;
-    size_t pending_failed_tail_bytes = 0;
-    bool pending_repair_on_surrounding = false;
-    unsigned repair_attempts = 0;
-    uint64_t pending_generation = 0;
 };
 
 // Evdev keycodes map
@@ -139,14 +113,6 @@ WindowTracker* g_windowTracker = nullptr;
 
 static bool g_app_excluded = false;
 
-static void keyboard_key(void* data, struct wl_keyboard* keyboard, uint32_t serial,
-                         uint32_t time, uint32_t key, uint32_t state_key);
-static void keyboard_modifiers(void* data, struct wl_keyboard* keyboard, uint32_t serial,
-                               uint32_t mods_depressed, uint32_t mods_latched,
-                               uint32_t mods_locked, uint32_t group);
-static void drain_pending_events(WaylandState* state);
-static bool repair_dropped_delete(WaylandState* state);
-
 static void reset_composition(WaylandState* state, bool clear_client_preedit = false) {
     Bamboo_Reset();
     if (state) {
@@ -159,59 +125,56 @@ static void reset_composition(WaylandState* state, bool clear_client_preedit = f
 }
 
 static bool has_fresh_surrounding(const WaylandState* state) {
-    return state->has_surrounding_text && !state->edit_pending;
+    return state->has_surrounding_text &&
+           (!state->edit_pending || state->surrounding_serial != state->last_edit_serial);
 }
 
-static void clear_pending_edit(WaylandState* state, bool clear_events = false) {
-    ++state->pending_generation;
-    state->edit_pending = false;
-    state->pending_expected = {};
-    state->pending_delete_dropped = {};
-    state->pending_desired_tail.clear();
-    state->pending_failed_tail_bytes = 0;
-    state->pending_repair_on_surrounding = false;
-    state->repair_attempts = 0;
-    if (clear_events) {
-        state->pending_events.clear();
+static void note_text_edit(WaylandState* state) {
+    state->last_edit_serial = state->latest_serial;
+    state->edit_pending = true;
+}
+
+static void predict_surrounding_edit(WaylandState* state,
+                                     const SurroundingReplacement& replacement,
+                                     size_t old_tail_bytes,
+                                     const std::string& suffix) {
+    if (!state->has_surrounding_text) return;
+
+    size_t start = 0;
+    size_t end = 0;
+    if (replacement.uses_surrounding) {
+        start = replacement.start;
+        end = replacement.end;
+    } else {
+        const size_t selection_start = std::min<size_t>(state->surrounding_cursor,
+                                                        state->surrounding_anchor);
+        const size_t selection_end = std::max<size_t>(state->surrounding_cursor,
+                                                      state->surrounding_anchor);
+        if (state->surrounding_cursor > state->surrounding_text.size() ||
+            state->surrounding_anchor > state->surrounding_text.size() ||
+            old_tail_bytes > selection_start) {
+            return;
+        }
+        start = selection_start - old_tail_bytes;
+        end = selection_end;
     }
+
+    state->surrounding_text.replace(start, end - start, suffix);
+    const size_t cursor = start + suffix.size();
+    state->surrounding_cursor = static_cast<uint32_t>(cursor);
+    state->surrounding_anchor = static_cast<uint32_t>(cursor);
 }
 
-static void finish_pending_edit(WaylandState* state) {
-    clear_pending_edit(state);
-    drain_pending_events(state);
-}
-
-static void arm_pending_timeout(WaylandState* state) {
-    const uint64_t generation = ++state->pending_generation;
-    QTimer::singleShot(500, [state, generation]() {
-        if (!state->edit_pending || state->pending_generation != generation) {
-            return;
-        }
-        if (surrounding_matches(
-                state->pending_delete_dropped,
-                state->surrounding_text,
-                state->surrounding_cursor,
-                state->surrounding_anchor) &&
-            repair_dropped_delete(state)) {
-            return;
-        }
-        log_to_file("WARNING: Direct Commit acknowledgement timed out; resetting composition");
-        reset_composition(state);
-        finish_pending_edit(state);
-    });
-}
-
-static bool replace_native_composition(WaylandState* state,
-                                       const std::string& new_composition,
-                                       const std::string& trailing_text = "") {
+static void replace_native_composition(WaylandState* state,
+                                       const std::string& new_composition) {
     const std::string old_composition = state->composed_word;
     const size_t common = utf8_common_prefix_bytes(old_composition, new_composition);
     const size_t old_tail_bytes = old_composition.size() - common;
-    const std::string committed_text = new_composition.substr(common) + trailing_text;
+    const std::string suffix = new_composition.substr(common);
 
-    if (old_tail_bytes == 0 && committed_text.empty()) {
+    if (old_tail_bytes == 0 && suffix.empty()) {
         state->composed_word = new_composition;
-        return false;
+        return;
     }
 
     SurroundingReplacement replacement;
@@ -225,84 +188,17 @@ static bool replace_native_composition(WaylandState* state,
         replacement.length = static_cast<uint32_t>(old_tail_bytes);
     }
 
-    SurroundingSnapshot expected;
-    SurroundingSnapshot delete_dropped;
-    if (state->has_surrounding_text) {
-        expected = apply_surrounding_replacement(
-            state->surrounding_text, state->surrounding_cursor,
-            state->surrounding_anchor, replacement, committed_text);
-        const auto insert_only = make_surrounding_replacement(
-            0, state->surrounding_text,
-            state->surrounding_cursor, state->surrounding_anchor);
-        delete_dropped = apply_surrounding_replacement(
-            state->surrounding_text, state->surrounding_cursor,
-            state->surrounding_anchor, insert_only, committed_text);
-    }
-
     if (old_tail_bytes > 0) {
         zwp_input_method_context_v1_delete_surrounding_text(
             state->context, replacement.index, replacement.length);
     }
 
-    // KWin forwards delete and commit as separate text-input transactions.
-    // Queue following keys until surrounding text confirms the complete edit.
+    // An empty commit still applies the pending deletion.
     zwp_input_method_context_v1_commit_string(
-        state->context, state->latest_serial, committed_text.c_str());
-
-    if (expected.valid && delete_dropped.valid) {
-        state->edit_pending = true;
-        state->pending_expected = std::move(expected);
-        state->pending_delete_dropped = std::move(delete_dropped);
-        state->pending_desired_tail = new_composition + trailing_text;
-        state->pending_failed_tail_bytes = old_composition.size() + committed_text.size();
-        state->pending_repair_on_surrounding = !committed_text.empty();
-        state->repair_attempts = 0;
-        arm_pending_timeout(state);
-    }
+        state->context, state->latest_serial, suffix.c_str());
+    predict_surrounding_edit(state, replacement, old_tail_bytes, suffix);
+    note_text_edit(state);
     state->composed_word = new_composition;
-    return true;
-}
-
-static bool repair_dropped_delete(WaylandState* state) {
-    if (state->repair_attempts >= 3 || !state->has_surrounding_text) {
-        return false;
-    }
-
-    const auto replacement = make_surrounding_replacement(
-        state->pending_failed_tail_bytes,
-        state->surrounding_text,
-        state->surrounding_cursor,
-        state->surrounding_anchor);
-    if (!replacement.uses_surrounding) {
-        return false;
-    }
-
-    const auto expected = apply_surrounding_replacement(
-        state->surrounding_text, state->surrounding_cursor,
-        state->surrounding_anchor, replacement, state->pending_desired_tail);
-    const auto insert_only = make_surrounding_replacement(
-        0, state->surrounding_text,
-        state->surrounding_cursor, state->surrounding_anchor);
-    const auto delete_dropped = apply_surrounding_replacement(
-        state->surrounding_text, state->surrounding_cursor,
-        state->surrounding_anchor, insert_only, state->pending_desired_tail);
-    if (!expected.valid || !delete_dropped.valid) {
-        return false;
-    }
-
-    zwp_input_method_context_v1_delete_surrounding_text(
-        state->context, replacement.index, replacement.length);
-    zwp_input_method_context_v1_commit_string(
-        state->context, state->latest_serial, state->pending_desired_tail.c_str());
-
-    state->pending_expected = expected;
-    state->pending_delete_dropped = delete_dropped;
-    state->pending_failed_tail_bytes += state->pending_desired_tail.size();
-    state->pending_repair_on_surrounding = !state->pending_desired_tail.empty();
-    ++state->repair_attempts;
-    arm_pending_timeout(state);
-    log_to_file("DEBUG: Retrying a Direct Commit after a dropped delete");
-    return true;
 }
 
 static std::string bamboo_string(bool final) {
@@ -329,28 +225,10 @@ static void keyboard_keymap(void* data, struct wl_keyboard* keyboard, uint32_t f
 static void keyboard_enter(void* data, struct wl_keyboard* keyboard, uint32_t serial, struct wl_surface* surface, struct wl_array* keys) {}
 static void keyboard_leave(void* data, struct wl_keyboard* keyboard, uint32_t serial, struct wl_surface* surface) {}
 
-static void queue_key_event(WaylandState* state, wl_keyboard* keyboard,
-                            uint32_t serial, uint32_t time,
-                            uint32_t key, uint32_t state_key) {
-    PendingInputEvent event = {};
-    event.type = PendingInputType::Key;
-    event.keyboard = keyboard;
-    event.serial = serial;
-    event.time = time;
-    event.key = key;
-    event.state = state_key;
-    state->pending_events.push_back(event);
-}
-
 static void keyboard_key(void* data, struct wl_keyboard* keyboard, uint32_t serial, uint32_t time, uint32_t key, uint32_t state_key) {
     WaylandState* state = static_cast<WaylandState*>(data);
     
     if (!state->active || !state->context) {
-        return;
-    }
-
-    if (state->edit_pending) {
-        queue_key_event(state, keyboard, serial, time, key, state_key);
         return;
     }
 
@@ -550,7 +428,6 @@ static void keyboard_key(void* data, struct wl_keyboard* keyboard, uint32_t seri
                 Bamboo_RemoveLastChar();
             } else if (!Bamboo_CanProcessKey(c)) {
                 std::string final_word = bamboo_string(true);
-                const bool had_composition = !state->composed_word.empty();
                 
                 // Gõ tắt (Macro)
                 if (g_mainWindow && g_mainWindow->isMacroEnabled()) {
@@ -561,23 +438,8 @@ static void keyboard_key(void* data, struct wl_keyboard* keyboard, uint32_t seri
                     }
                 }
 
-                bool edit_sent = false;
-                if (had_composition && c != '\n') {
-                    edit_sent = replace_native_composition(
-                        state, final_word, std::string(1, c));
-                } else {
-                    edit_sent = replace_native_composition(state, final_word);
-                }
+                replace_native_composition(state, final_word);
                 reset_composition(state);
-
-                if (had_composition && c != '\n') {
-                    eaten_keys.insert(key);
-                    return;
-                }
-                if (edit_sent && state->edit_pending) {
-                    queue_key_event(state, keyboard, serial, time, key, state_key);
-                    return;
-                }
                 zwp_input_method_context_v1_key(state->context, serial, time, key, state_key);
                 return;
             } else {
@@ -608,19 +470,6 @@ static void keyboard_key(void* data, struct wl_keyboard* keyboard, uint32_t seri
 
 static void keyboard_modifiers(void* data, struct wl_keyboard* keyboard, uint32_t serial, uint32_t mods_depressed, uint32_t mods_latched, uint32_t mods_locked, uint32_t group) {
     WaylandState* state = static_cast<WaylandState*>(data);
-    if (state->edit_pending) {
-        PendingInputEvent event = {};
-        event.type = PendingInputType::Modifiers;
-        event.keyboard = keyboard;
-        event.serial = serial;
-        event.mods_depressed = mods_depressed;
-        event.mods_latched = mods_latched;
-        event.mods_locked = mods_locked;
-        event.group = group;
-        state->pending_events.push_back(event);
-        return;
-    }
-
     g_modifiers = mods_depressed | mods_latched | mods_locked;
     
     if (mods_depressed == 0) {
@@ -632,22 +481,6 @@ static void keyboard_modifiers(void* data, struct wl_keyboard* keyboard, uint32_
 
     if (state->context) {
         zwp_input_method_context_v1_modifiers(state->context, serial, mods_depressed, mods_latched, mods_locked, group);
-    }
-}
-
-static void drain_pending_events(WaylandState* state) {
-    while (state->active && state->context && !state->edit_pending &&
-           !state->pending_events.empty()) {
-        PendingInputEvent event = state->pending_events.front();
-        state->pending_events.pop_front();
-        if (event.type == PendingInputType::Key) {
-            keyboard_key(state, event.keyboard, event.serial, event.time,
-                         event.key, event.state);
-        } else {
-            keyboard_modifiers(state, event.keyboard, event.serial,
-                               event.mods_depressed, event.mods_latched,
-                               event.mods_locked, event.group);
-        }
     }
 }
 
@@ -670,31 +503,15 @@ static void input_method_context_surrounding_text(void* data, struct zwp_input_m
     state->surrounding_cursor = cursor;
     state->surrounding_anchor = anchor;
     state->has_surrounding_text = true;
-
-    // A matching surrounding-text update proves that the client applied the
-    // complete Direct Commit. Do not wait for commit_state: Qt can defer that
-    // event while the next grabbed keyboard events are already arriving.
-    if (state->edit_pending && surrounding_matches(
-            state->pending_expected,
-            state->surrounding_text,
-            state->surrounding_cursor,
-            state->surrounding_anchor)) {
-        finish_pending_edit(state);
-    } else if (state->edit_pending && state->pending_repair_on_surrounding &&
-               surrounding_matches(
-                   state->pending_delete_dropped,
-                   state->surrounding_text,
-                   state->surrounding_cursor,
-                   state->surrounding_anchor)) {
-        repair_dropped_delete(state);
-    }
+    state->surrounding_dirty = true;
 }
 static void input_method_context_reset(void* data, struct zwp_input_method_context_v1* context) {
     WaylandState* state = static_cast<WaylandState*>(data);
     if (state) {
         reset_composition(state);
         state->has_surrounding_text = false;
-        clear_pending_edit(state, true);
+        state->surrounding_dirty = false;
+        state->edit_pending = false;
     }
 }
 static void input_method_context_content_type(void* data, struct zwp_input_method_context_v1* context, uint32_t hint, uint32_t purpose) {
@@ -711,6 +528,13 @@ static void input_method_context_invoke_action(void* data, struct zwp_input_meth
 static void input_method_context_commit_state(void* data, struct zwp_input_method_context_v1* context, uint32_t serial) {
     WaylandState* state = static_cast<WaylandState*>(data);
     state->latest_serial = serial;
+    if (state->surrounding_dirty) {
+        state->surrounding_serial = serial;
+        state->surrounding_dirty = false;
+    }
+    if (state->edit_pending && serial != state->last_edit_serial) {
+        state->edit_pending = false;
+    }
 }
 
 static void input_method_context_preferred_language(void* data, struct zwp_input_method_context_v1* context, const char* language) {}
@@ -738,7 +562,8 @@ static void input_method_activate(void* data, struct zwp_input_method_v1* input_
     reset_composition(state);
     state->content_purpose = 0;
     state->has_surrounding_text = false;
-    clear_pending_edit(state, true);
+    state->surrounding_dirty = false;
+    state->edit_pending = false;
 
     if (state->keyboard) {
         wl_proxy_destroy((struct wl_proxy*)state->keyboard);
@@ -772,7 +597,8 @@ static void input_method_deactivate(void* data, struct zwp_input_method_v1* inpu
     eaten_keys.clear();
     reset_composition(state);
     state->has_surrounding_text = false;
-    clear_pending_edit(state, true);
+    state->surrounding_dirty = false;
+    state->edit_pending = false;
     
     if (state->keyboard) {
         wl_proxy_destroy((struct wl_proxy*)state->keyboard);
