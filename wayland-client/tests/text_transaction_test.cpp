@@ -14,7 +14,6 @@ int main() {
     assert(common == 2);
     assert(word.size() - common == 2);
     assert(toned.substr(common) == "ể");
-
     const auto plain = make_surrounding_replacement(2, word, 4, 4);
     assert(plain.uses_surrounding);
     assert(plain.index == -2);
@@ -51,6 +50,16 @@ int main() {
                                 after_delete.cursor, after_delete.anchor));
     assert(surrounding_matches(expected, accented_word,
                                accented_word.size(), accented_word.size()));
+
+    // Electron may change or truncate the surrounding-text window, and may
+    // include unrelated text after the caret. Match only the local prefix.
+    const std::string shifted = "older context cách unrelated suffix";
+    const auto shifted_cursor = shifted.find(" unrelated suffix");
+    assert(surrounding_prefix_ends_with(
+        shifted, shifted_cursor, shifted_cursor, "cách"));
+    assert(!surrounding_prefix_ends_with(
+        "older context cacách", std::string("older context cacách").size(),
+        std::string("older context cacách").size(), " cách"));
 
     // A later commit must preserve both the successful and failed branches
     // until the client reports which transaction it actually applied.

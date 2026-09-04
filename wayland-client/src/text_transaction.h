@@ -107,6 +107,16 @@ inline bool surrounding_matches(const SurroundingSnapshot& expected,
            expected.cursor == cursor && expected.anchor == anchor;
 }
 
+inline bool surrounding_prefix_ends_with(const std::string& text,
+                                         uint32_t cursor,
+                                         uint32_t anchor,
+                                         const std::string& suffix) {
+    if (cursor > text.size() || anchor > text.size()) return false;
+    const size_t insertion = std::min<size_t>(cursor, anchor);
+    return suffix.size() <= insertion &&
+           text.compare(insertion - suffix.size(), suffix.size(), suffix) == 0;
+}
+
 inline SurroundingSnapshot apply_forwarded_key(const SurroundingSnapshot& snapshot,
                                                char key) {
     if (!snapshot.valid || snapshot.cursor > snapshot.text.size() ||
